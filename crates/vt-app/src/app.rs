@@ -577,12 +577,14 @@ impl ApplicationHandler<AppEvent> for App {
         event: WindowEvent,
     ) {
         let is_keyboard = matches!(event, WindowEvent::KeyboardInput { .. });
+        let is_scroll = matches!(event, WindowEvent::MouseWheel { .. });
         if let Some(egui_state) = &mut self.egui_state {
             if let Some(gpu) = &self.gpu {
                 let response = egui_state.on_window_event(&gpu.window, &event);
-                // Only let egui consume keyboard when a dialog/text field is active
                 let egui_needs_kb = self.show_new_branch_dialog;
-                if response.consumed && (!is_keyboard || egui_needs_kb) {
+                // Always pass keyboard and scroll events to terminal
+                let force_passthrough = is_keyboard && !egui_needs_kb || is_scroll;
+                if response.consumed && !force_passthrough {
                     if response.repaint {
                         gpu.window.request_redraw();
                     }
