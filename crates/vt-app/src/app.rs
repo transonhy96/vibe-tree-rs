@@ -598,6 +598,32 @@ impl App {
         let detected_items: Vec<DetectedItem> = self.active_ws()
             .map(|ws| ws.detected_items.clone())
             .unwrap_or_default();
+        // Compute selection highlight rects
+        let selection_rects: Vec<(f32, f32, f32, f32)> = {
+            let mut rects = Vec::new();
+            if let Some(terminal) = self.active_terminal() {
+                let term = terminal.term.lock();
+                if let Some(sel) = term.selection.as_ref().and_then(|s| s.to_range(&*term)) {
+                    if let Some(renderer) = &self.terminal_renderer {
+                        let header = 80.0_f32;
+                        let sidebar = if has_workspace { self.sidebar_width } else { 0.0 };
+                        let cw = renderer.cell_width;
+                        let ch = renderer.cell_height;
+                        let cols = self.terminal_size.0 as usize;
+
+                        for line in sel.start.line.0..=sel.end.line.0 {
+                            let sc = if line == sel.start.line.0 { sel.start.column.0 } else { 0 };
+                            let ec = if line == sel.end.line.0 { sel.end.column.0 + 1 } else { cols };
+                            let x = sidebar + sc as f32 * cw;
+                            let y = header + line as f32 * ch;
+                            let w = (ec - sc) as f32 * cw;
+                            rects.push((x, y, w, ch));
+                        }
+                    }
+                }
+            }
+            rects
+        };
         let show_new_branch = self.show_new_branch_dialog;
         let mut new_branch = self.new_branch_name.clone();
         let show_open_project = self.show_open_project_dialog;
@@ -740,7 +766,17 @@ impl App {
                             }
                         });
                     } else if has_terminal {
-                        // Terminal area is transparent — mouse handled via winit events
+                        // Draw selection highlight backgrounds
+                        for &(x, y, w, h) in &selection_rects {
+                            let rect = egui::Rect::from_min_size(
+                                egui::pos2(x, y),
+                                egui::vec2(w, h),
+                            );
+                            ui.painter().rect_filled(
+                                rect, 0.0,
+                                egui::Color32::from_rgba_unmultiplied(200, 200, 255, 50),
+                            );
+                        }
                     }
                 });
 
