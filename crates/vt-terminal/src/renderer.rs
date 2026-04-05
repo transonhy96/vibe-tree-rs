@@ -257,7 +257,14 @@ impl TerminalRenderer {
                 // Divider
                 let divider_y = offset_y + scrollback_display_rows as f32 * self.cell_height;
                 let metrics = Metrics::new(self.font_size, self.cell_height);
-                let divider_text = format!("{} LIVE {}", "-".repeat(20), "-".repeat(20));
+                let label = " LIVE ";
+                let side_len = cols.saturating_sub(label.len()) / 2;
+                let divider_text = format!(
+                    "{}{}{}",
+                    "-".repeat(side_len),
+                    label,
+                    "-".repeat(cols.saturating_sub(side_len + label.len()))
+                );
                 let mut div_buf = GlyphonBuffer::new(&mut self.font_system, metrics);
                 div_buf.set_size(&mut self.font_system, Some(screen_width as f32), None);
                 div_buf.set_text(
