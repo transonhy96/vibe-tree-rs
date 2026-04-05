@@ -203,16 +203,12 @@ impl TerminalRenderer {
     ) {
         let metrics = Metrics::new(self.font_size, self.cell_height);
 
-        let last_line = row_data.last().map(|(l, _, _)| *l).unwrap_or(0);
-        let first_line = row_data.first().map(|(l, _, _)| *l).unwrap_or(0);
-        let content_lines = (last_line - first_line + 1) as f32;
-        let available_rows = ((screen_height as f32 - offset_y) / self.cell_height).floor();
-
-        let y_base = if content_lines < available_rows {
-            offset_y - first_line as f32 * self.cell_height
-        } else {
-            offset_y + screen_lines as f32 * self.cell_height
-        };
+        // Absolute grid positioning:
+        // display_iter lines go from -(screen_lines-1) (top) to 0 (bottom)
+        // y = offset_y + (line + screen_lines) * cell_height
+        // This puts line -(screen_lines-1) at offset_y + cell_height (top)
+        // and line 0 at offset_y + screen_lines * cell_height (bottom)
+        let y_base = offset_y + screen_lines as f32 * self.cell_height;
 
         self.cached_lines.clear();
 

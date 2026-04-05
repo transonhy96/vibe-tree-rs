@@ -609,11 +609,15 @@ impl ApplicationHandler<AppEvent> for App {
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let lines = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => y as i32,
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => {
+                        // 3 terminal lines per scroll notch
+                        (y * 3.0) as i32
+                    }
                     winit::event::MouseScrollDelta::PixelDelta(pos) => {
-                        (pos.y / self.terminal_renderer.as_ref()
+                        let ch = self.terminal_renderer.as_ref()
                             .map(|r| r.cell_height as f64)
-                            .unwrap_or(19.0)) as i32
+                            .unwrap_or(19.0);
+                        (pos.y / ch) as i32
                     }
                 };
                 if lines != 0 {
