@@ -9,6 +9,7 @@ vt-git = { path = "../vt-git" }
 vt-pty = { path = "../vt-pty" }
 vt-terminal = { path = "../vt-terminal" }
 vt-ui = { path = "../vt-ui" }
+vt-embed = { path = "../vt-embed" }
 winit = { workspace = true }
 wgpu = { workspace = true }
 egui = { workspace = true }
@@ -19,3 +20,4 @@ rfd = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+raw-window-handle = "0.6"

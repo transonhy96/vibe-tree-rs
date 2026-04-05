@@ -1,0 +1,11 @@
+[package]
+name = "vt-embed"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11-dl = "2"

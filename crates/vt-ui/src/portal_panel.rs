@@ -58,6 +58,9 @@ pub enum PortalAction {
     Close,
     ToggleCollapse,
     ClearItems,
+    EmbedByName(String),
+    EmbedByPid(u32),
+    ReleaseEmbed,
 }
 
 pub struct PortalPanelResult {
@@ -187,6 +190,7 @@ pub fn draw_portal_panel(
     ctx: &egui::Context,
     detected_items: &[DetectedItem],
     collapsed: bool,
+    has_embedded: bool,
 ) -> PortalPanelResult {
     let mut action = None;
 
@@ -238,7 +242,14 @@ pub fn draw_portal_panel(
                     if ui.small_button(">").on_hover_text("Collapse").clicked() {
                         action = Some(PortalAction::ToggleCollapse);
                     }
-                    if !detected_items.is_empty() {
+                    if has_embedded {
+                        if ui.add(egui::Button::new(
+                            RichText::new("Release").color(Color32::from_rgb(239, 41, 41)).size(11.0)
+                        ).small()).on_hover_text("Release embedded window").clicked() {
+                            action = Some(PortalAction::ReleaseEmbed);
+                        }
+                    }
+                    if !detected_items.is_empty() && !has_embedded {
                         if ui.small_button("Clear").on_hover_text("Clear all").clicked() {
                             action = Some(PortalAction::ClearItems);
                         }
@@ -309,6 +320,13 @@ pub fn draw_portal_panel(
                                             .size(11.0)
                                             .color(Color32::from_rgb(200, 200, 200)),
                                     );
+                                    if !has_embedded {
+                                        if ui.add(egui::Button::new(
+                                            RichText::new("Embed").size(10.0).color(Color32::from_rgb(66, 133, 244))
+                                        ).small()).on_hover_text("Embed this app's window into the portal").clicked() {
+                                            action = Some(PortalAction::EmbedByName(item.kind.label().to_string()));
+                                        }
+                                    }
                                 });
                             }
                             ui.add_space(8.0);

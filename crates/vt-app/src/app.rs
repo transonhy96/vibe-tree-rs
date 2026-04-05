@@ -6,6 +6,7 @@ use std::sync::Arc;
 use vt_core::config::AppConfig;
 use vt_core::types::Worktree;
 use vt_terminal::{TerminalInstance, TerminalRenderer};
+use vt_embed::{EmbedRect, EmbeddedWindow};
 use vt_ui::{draw_worktree_panel, draw_portal_panel, scan_output, DetectedItem, ThemeColors, WorktreeAction, WorktreePanelResult, PortalAction, PortalPanelResult};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
@@ -24,7 +25,9 @@ struct Workspace {
     sidebar_collapsed: bool,
     portal_collapsed: bool,
     detected_items: Vec<DetectedItem>,
-    last_scan_hash: u64, // track content changes for scanning
+    last_scan_hash: u64,
+    embedded_window: Option<EmbeddedWindow>,
+    portal_rect: Option<EmbedRect>, // screen-space rect of portal area
 }
 
 pub struct App {
@@ -164,9 +167,11 @@ impl App {
             has_remote_updates: false,
             default_branch: Some(default_branch.clone()),
             sidebar_collapsed: false,
-            portal_collapsed: true, // start collapsed
+            portal_collapsed: true,
             detected_items: Vec::new(),
             last_scan_hash: 0,
+            embedded_window: None,
+            portal_rect: None,
         };
         self.workspaces.push(ws);
         let idx = self.workspaces.len() - 1;
@@ -374,6 +379,60 @@ impl App {
         ws.terminals.get(wt_path)
     }
 
+    #[cfg(target_os = "linux")]
+    fn get_native_window_id(&self) -> Option<u64> {
+        use raw_window_handle::HasWindowHandle;
+        let gpu = self.gpu.as_ref()?;
+        let handle = gpu.window.window_handle().ok()?;
+        match handle.as_raw() {
+            raw_window_handle::RawWindowHandle::Xlib(h) => Some(h.window as u64),
+            raw_window_handle::RawWindowHandle::Xcb(h) => Some(h.window.get() as u64),
+            _ => None,
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn get_native_window_id(&self) -> Option<u64> {
+        None
+    }
+
+    fn try_embed_by_name(&mut self, name: &str) {
+        let parent_id = match self.get_native_window_id() {
+            Some(id) => id,
+            None => {
+                tracing::error!("Cannot get native window ID");
+                return;
+            }
+        };
+
+        // Get portal rect from the portal panel result
+        // Use a reasonable default based on window size
+        let gpu = match &self.gpu {
+            Some(g) => g,
+            None => return,
+        };
+        let win_size = gpu.window.inner_size();
+        let portal_width = 300u32;
+        let rect = EmbedRect {
+            x: (win_size.width - portal_width) as i32,
+            y: 80, // below header
+            width: portal_width,
+            height: win_size.height.saturating_sub(80),
+        };
+
+        match vt_embed::embed_window_by_name(parent_id, name, rect) {
+            Ok(embedded) => {
+                tracing::info!(name, "Window embedded successfully");
+                if let Some(ws) = self.active_ws_mut() {
+                    ws.embedded_window = Some(embedded);
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to embed window '{}': {}", name, e);
+            }
+        }
+    }
+
     fn calc_terminal_size(&self, w: f32, h: f32, cw: f32, ch: f32) -> (u16, u16) {
         let header = 80.0_f32; // tabs + header
         let sidebar = if self.active_ws().is_some() { self.sidebar_width } else { 0.0 };
@@ -473,6 +532,7 @@ impl App {
         let has_remote_updates = self.active_ws().map(|ws| ws.has_remote_updates).unwrap_or(false);
         let sidebar_collapsed = self.active_ws().map(|ws| ws.sidebar_collapsed).unwrap_or(false);
         let portal_collapsed = self.active_ws().map(|ws| ws.portal_collapsed).unwrap_or(true);
+        let has_embedded = self.active_ws().map(|ws| ws.embedded_window.is_some()).unwrap_or(false);
         let detected_items: Vec<DetectedItem> = self.active_ws()
             .map(|ws| ws.detected_items.clone())
             .unwrap_or_default();
@@ -578,7 +638,7 @@ impl App {
 
             // Portal panel (right side, only when workspace is open)
             if has_workspace {
-                portal_result = Some(draw_portal_panel(ctx, &detected_items, portal_collapsed));
+                portal_result = Some(draw_portal_panel(ctx, &detected_items, portal_collapsed, has_embedded));
             }
 
             // Central panel
@@ -844,6 +904,18 @@ impl App {
                 PortalAction::ClearItems => {
                     if let Some(ws) = self.active_ws_mut() {
                         ws.detected_items.clear();
+                    }
+                }
+                PortalAction::EmbedByName(name) => {
+                    self.try_embed_by_name(&name);
+                }
+                PortalAction::EmbedByPid(pid) => {
+                    tracing::info!(pid, "Embed by PID requested");
+                }
+                PortalAction::ReleaseEmbed => {
+                    if let Some(ws) = self.active_ws_mut() {
+                        ws.embedded_window.take(); // Drop releases the window
+                        tracing::info!("Embedded window released");
                     }
                 }
             }

@@ -3720,11 +3720,13 @@ dependencies = [
  "egui",
  "egui-wgpu",
  "egui-winit",
+ "raw-window-handle",
  "rfd",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "vt-core",
+ "vt-embed",
  "vt-git",
  "vt-pty",
  "vt-terminal",
@@ -3743,6 +3745,15 @@ dependencies = [
  "sha2",
  "thiserror 2.0.18",
  "toml",
+]
+
+[[package]]
+name = "vt-embed"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+ "tracing",
+ "x11-dl",
 ]
 
 [[package]]
