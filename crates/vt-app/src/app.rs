@@ -392,6 +392,8 @@ impl App {
     }
 
     /// Convert pixel position to terminal grid (col, line).
+    /// Convert pixel position to terminal grid coordinates.
+    /// Returns (column, line) where Line(0) = top of visible area.
     fn pixel_to_cell(&self, x: f32, y: f32) -> Option<(usize, i32)> {
         let renderer = self.terminal_renderer.as_ref()?;
         let header = 80.0;
@@ -402,11 +404,11 @@ impl App {
             return None;
         }
         let col = (term_x / renderer.cell_width) as usize;
-        let row = (term_y / renderer.cell_height) as i32;
-        // Convert screen row to alacritty line index
-        let screen_lines = self.terminal_size.1 as i32;
-        let line = row - screen_lines + 1; // line 0 = bottom, -(n-1) = top
-        Some((col, line))
+        let line = (term_y / renderer.cell_height) as i32;
+        // Clamp to valid range
+        let max_col = self.terminal_size.0 as usize;
+        let max_line = self.terminal_size.1 as i32;
+        Some((col.min(max_col.saturating_sub(1)), line.min(max_line - 1)))
     }
 
     fn copy_selection(&mut self) {

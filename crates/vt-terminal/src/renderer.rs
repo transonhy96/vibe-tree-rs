@@ -505,14 +505,15 @@ impl TerminalRenderer {
 
         // Check if any character in this line is selected
         let has_selection = selection.as_ref().map(|sel| {
-            chars.iter().enumerate().any(|(col, _)| {
+            let matched = chars.iter().enumerate().any(|(col, _)| {
                 sel.contains(Point::new(Line(line), Column(col)))
-            })
+            });
+            matched
         }).unwrap_or(false);
 
         let color = if has_selection {
-            // Selected text: bright white (visual feedback)
-            GlyphonColor::rgb(255, 255, 255)
+            // Selected text: bright cyan for clear visual feedback
+            GlyphonColor::rgb(0, 255, 255)
         } else {
             chars
                 .iter()
