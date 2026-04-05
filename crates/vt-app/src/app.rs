@@ -976,21 +976,44 @@ impl ApplicationHandler<AppEvent> for App {
                 event: KeyEvent { state: ElementState::Pressed, ref logical_key, ref text, .. }, ..
             } => {
                 if let Some(terminal) = self.active_terminal() {
-                    match logical_key {
-                        Key::Named(NamedKey::Enter) => terminal.write(b"\r"),
-                        Key::Named(NamedKey::Backspace) => terminal.write(b"\x7f"),
-                        Key::Named(NamedKey::Tab) => terminal.write(b"\t"),
-                        Key::Named(NamedKey::Escape) => terminal.write(b"\x1b"),
-                        Key::Named(NamedKey::ArrowUp) => terminal.write(b"\x1b[A"),
-                        Key::Named(NamedKey::ArrowDown) => terminal.write(b"\x1b[B"),
-                        Key::Named(NamedKey::ArrowRight) => terminal.write(b"\x1b[C"),
-                        Key::Named(NamedKey::ArrowLeft) => terminal.write(b"\x1b[D"),
-                        Key::Named(NamedKey::Home) => terminal.write(b"\x1b[H"),
-                        Key::Named(NamedKey::End) => terminal.write(b"\x1b[F"),
-                        Key::Named(NamedKey::PageUp) => terminal.write(b"\x1b[5~"),
-                        Key::Named(NamedKey::PageDown) => terminal.write(b"\x1b[6~"),
-                        Key::Named(NamedKey::Delete) => terminal.write(b"\x1b[3~"),
-                        _ => { if let Some(text) = text { terminal.write(text.as_bytes()); } }
+                    // Check modifiers for Ctrl combos
+                    let modifiers = self.egui_ctx.input(|i| i.modifiers);
+                    let ctrl = modifiers.ctrl;
+
+                    if ctrl {
+                        // Ctrl+letter → send control character (0x01-0x1A)
+                        if let Key::Character(ch) = logical_key {
+                            if let Some(c) = ch.chars().next() {
+                                let ctrl_byte = match c {
+                                    'a'..='z' => Some(c as u8 - b'a' + 1),
+                                    'A'..='Z' => Some(c as u8 - b'A' + 1),
+                                    '\\' => Some(0x1c), // Ctrl+\ = SIGQUIT
+                                    ']' => Some(0x1d),
+                                    '[' => Some(0x1b), // ESC
+                                    _ => None,
+                                };
+                                if let Some(b) = ctrl_byte {
+                                    terminal.write(&[b]);
+                                }
+                            }
+                        }
+                    } else {
+                        match logical_key {
+                            Key::Named(NamedKey::Enter) => terminal.write(b"\r"),
+                            Key::Named(NamedKey::Backspace) => terminal.write(b"\x7f"),
+                            Key::Named(NamedKey::Tab) => terminal.write(b"\t"),
+                            Key::Named(NamedKey::Escape) => terminal.write(b"\x1b"),
+                            Key::Named(NamedKey::ArrowUp) => terminal.write(b"\x1b[A"),
+                            Key::Named(NamedKey::ArrowDown) => terminal.write(b"\x1b[B"),
+                            Key::Named(NamedKey::ArrowRight) => terminal.write(b"\x1b[C"),
+                            Key::Named(NamedKey::ArrowLeft) => terminal.write(b"\x1b[D"),
+                            Key::Named(NamedKey::Home) => terminal.write(b"\x1b[H"),
+                            Key::Named(NamedKey::End) => terminal.write(b"\x1b[F"),
+                            Key::Named(NamedKey::PageUp) => terminal.write(b"\x1b[5~"),
+                            Key::Named(NamedKey::PageDown) => terminal.write(b"\x1b[6~"),
+                            Key::Named(NamedKey::Delete) => terminal.write(b"\x1b[3~"),
+                            _ => { if let Some(text) = text { terminal.write(text.as_bytes()); } }
+                        }
                     }
                 }
                 if let Some(gpu) = &self.gpu { gpu.window.request_redraw(); }
