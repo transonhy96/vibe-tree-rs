@@ -144,6 +144,32 @@ pub async fn get_current_branch(worktree_path: &Path) -> Result<String, GitError
     Ok(output.trim().to_string())
 }
 
+/// Fetch from remote (silent).
+pub async fn fetch(project_path: &Path) -> Result<(), GitError> {
+    execute_git_command(&["fetch", "--quiet"], project_path).await?;
+    Ok(())
+}
+
+/// Check if remote has new commits ahead of local branch.
+pub async fn has_remote_changes(project_path: &Path, branch: &str) -> bool {
+    // Compare local branch to its remote tracking branch
+    let remote_ref = format!("origin/{}", branch);
+    let result = execute_git_command(
+        &["rev-list", "--count", &format!("{}..{}", branch, remote_ref)],
+        project_path,
+    )
+    .await;
+    match result {
+        Ok(output) => output.trim().parse::<u64>().unwrap_or(0) > 0,
+        Err(_) => false,
+    }
+}
+
+/// Pull latest from remote for the given branch.
+pub async fn pull(project_path: &Path) -> Result<String, GitError> {
+    execute_git_command(&["pull"], project_path).await
+}
+
 /// Get the default branch name (main or master), if it exists.
 pub async fn get_default_branch(project_path: &Path) -> Option<String> {
     // Check if 'main' exists

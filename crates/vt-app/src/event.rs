@@ -9,4 +9,6 @@ pub enum AppEvent {
     CursorBlink,
     /// Request a redraw.
     Redraw,
+    /// Remote has new changes for a workspace.
+    RemoteUpdatesAvailable { workspace_idx: usize },
 }

@@ -7,6 +7,7 @@ pub enum WorktreeAction {
     CreateNew,
     Delete(usize),
     Refresh,
+    PullRemote,
 }
 
 /// Result from drawing the worktree panel.
@@ -21,6 +22,7 @@ pub fn draw_worktree_panel(
     worktrees: &[Worktree],
     selected_idx: Option<usize>,
     project_name: &str,
+    has_remote_updates: bool,
 ) -> WorktreePanelResult {
     let mut action = None;
 
@@ -39,8 +41,26 @@ pub fn draw_worktree_panel(
             ui.horizontal(|ui| {
                 ui.strong(RichText::new(project_name).color(Color32::WHITE));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("R").on_hover_text("Refresh worktrees").clicked() {
-                        action = Some(WorktreeAction::Refresh);
+                    // Pull/sync button — glows green when remote has updates
+                    let pull_color = if has_remote_updates {
+                        Color32::from_rgb(78, 154, 6) // green glow
+                    } else {
+                        Color32::from_rgb(150, 150, 150)
+                    };
+                    let pull_text = if has_remote_updates { "Pull" } else { "Sync" };
+                    let pull_tooltip = if has_remote_updates {
+                        "Remote has new changes - click to pull"
+                    } else {
+                        "Check and pull remote changes"
+                    };
+                    if ui.add(egui::Button::new(
+                        RichText::new(pull_text).color(pull_color).size(11.0)
+                    ).small()).on_hover_text(pull_tooltip).clicked() {
+                        if has_remote_updates {
+                            action = Some(WorktreeAction::PullRemote);
+                        } else {
+                            action = Some(WorktreeAction::Refresh);
+                        }
                     }
                     if ui.small_button("+").on_hover_text("New worktree").clicked() {
                         action = Some(WorktreeAction::CreateNew);
@@ -78,25 +98,26 @@ pub fn draw_worktree_panel(
                         Color32::from_rgb(200, 200, 200)
                     };
 
-                    let resp = ui.selectable_label(
-                        is_selected,
-                        RichText::new(format!("{} {}", if is_main { "*" } else { "-" }, branch_name))
-                            .color(text_color),
-                    );
+                    ui.horizontal(|ui| {
+                        let resp = ui.selectable_label(
+                            is_selected,
+                            RichText::new(format!("{} {}", if is_main { "*" } else { "-" }, branch_name))
+                                .color(text_color),
+                        );
 
-                    if resp.clicked() {
-                        action = Some(WorktreeAction::Select(i));
-                    }
+                        if resp.clicked() {
+                            action = Some(WorktreeAction::Select(i));
+                        }
 
-                    // Right-click context menu for non-main branches
-                    if !is_main {
-                        resp.context_menu(|ui| {
-                            if ui.button("Delete worktree").clicked() {
-                                action = Some(WorktreeAction::Delete(i));
-                                ui.close_menu();
-                            }
-                        });
-                    }
+                        // Delete button on the right (not for main)
+                        if !is_main {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("x").on_hover_text("Delete worktree").clicked() {
+                                    action = Some(WorktreeAction::Delete(i));
+                                }
+                            });
+                        }
+                    });
                 }
             });
         });

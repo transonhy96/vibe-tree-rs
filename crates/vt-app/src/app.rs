@@ -19,6 +19,8 @@ struct Workspace {
     worktrees: Vec<Worktree>,
     selected_worktree_idx: Option<usize>,
     terminals: HashMap<PathBuf, TerminalInstance>,
+    has_remote_updates: bool,
+    default_branch: Option<String>,
 }
 
 pub struct App {
@@ -142,18 +144,26 @@ impl App {
             b_main.cmp(&a_main).then_with(|| a.branch.cmp(&b.branch))
         });
 
+        let default_branch = self.rt.block_on(vt_git::get_default_branch(&path))
+            .unwrap_or_else(|| "main".to_string());
+
         tracing::info!(path = %path.display(), name = %name, worktrees = worktrees.len(), "Workspace opened");
 
         let ws = Workspace {
-            path,
+            path: path.clone(),
             name,
             worktrees,
             selected_worktree_idx: None,
             terminals: HashMap::new(),
+            has_remote_updates: false,
+            default_branch: Some(default_branch.clone()),
         };
         self.workspaces.push(ws);
         let idx = self.workspaces.len() - 1;
         self.active_workspace_idx = Some(idx);
+
+        // Start background remote check every 5 minutes
+        self.start_remote_check(idx, path, default_branch);
 
         // Auto-select first worktree (main if sorted correctly)
         if !self.workspaces[idx].worktrees.is_empty() {
@@ -238,6 +248,41 @@ impl App {
             // Re-borrow after creating terminal (can't hold ws across TerminalInstance::new)
             let ws = self.active_ws_mut().unwrap();
             ws.terminals.insert(wt_path, terminal);
+        }
+    }
+
+    fn start_remote_check(&self, ws_idx: usize, path: PathBuf, branch: String) {
+        let proxy = self.proxy.clone();
+        self.rt.spawn(async move {
+            loop {
+                // Wait 5 minutes
+                tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
+                // Fetch and check
+                let _ = vt_git::fetch(&path).await;
+                if vt_git::has_remote_changes(&path, &branch).await {
+                    tracing::info!("Remote updates available for {}", branch);
+                    if proxy.send_event(AppEvent::RemoteUpdatesAvailable { workspace_idx: ws_idx }).is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    fn pull_remote(&mut self) {
+        let ws = match self.active_ws_mut() {
+            Some(ws) => ws,
+            None => return,
+        };
+        let path = ws.path.clone();
+        match self.rt.block_on(vt_git::pull(&path)) {
+            Ok(output) => {
+                tracing::info!("Pull: {}", output.trim());
+                let ws = self.active_ws_mut().unwrap();
+                ws.has_remote_updates = false;
+                self.refresh_worktrees();
+            }
+            Err(e) => tracing::error!("Pull failed: {}", e),
         }
     }
 
@@ -346,6 +391,7 @@ impl App {
         let project_name = self.active_ws().map(|ws| ws.name.clone()).unwrap_or_default();
         let term_size = self.terminal_size;
         let has_terminal = self.active_terminal().is_some();
+        let has_remote_updates = self.active_ws().map(|ws| ws.has_remote_updates).unwrap_or(false);
         let show_new_branch = self.show_new_branch_dialog;
         let mut new_branch = self.new_branch_name.clone();
         let show_open_project = self.show_open_project_dialog;
@@ -431,7 +477,7 @@ impl App {
 
             // Worktree sidebar (only when workspace is open)
             if has_workspace {
-                wt_result = Some(draw_worktree_panel(ctx, &worktrees, selected_wt_idx, &project_name));
+                wt_result = Some(draw_worktree_panel(ctx, &worktrees, selected_wt_idx, &project_name, has_remote_updates));
             }
 
             // Central panel
@@ -497,28 +543,56 @@ impl App {
 
             // New branch dialog
             if show_new_branch {
+                let mut is_open = true;
                 egui::Window::new("New Worktree")
+                    .open(&mut is_open)
                     .collapsible(false)
                     .resizable(false)
+                    .min_width(400.0)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                     .show(ctx, |ui| {
+                        ui.add_space(8.0);
+                        ui.label(
+                            egui::RichText::new("Create a new git worktree branch")
+                                .size(14.0)
+                                .color(egui::Color32::from_rgb(180, 180, 180)),
+                        );
+                        ui.add_space(12.0);
                         ui.label("Branch name:");
-                        let resp = ui.text_edit_singleline(&mut new_branch);
+                        ui.add_space(4.0);
+                        let resp = ui.add_sized(
+                            [ui.available_width(), 28.0],
+                            egui::TextEdit::singleline(&mut new_branch)
+                                .hint_text("e.g. feature/my-feature"),
+                        );
+                        // Auto-focus the input
+                        if resp.gained_focus() || new_branch.is_empty() {
+                            resp.request_focus();
+                        }
+                        // Enter to create
                         if resp.lost_focus()
                             && ui.input(|i| i.key_pressed(egui::Key::Enter))
                             && !new_branch.is_empty()
                         {
                             create_branch = true;
                         }
+                        ui.add_space(12.0);
                         ui.horizontal(|ui| {
-                            if ui.button("Create").clicked() && !new_branch.is_empty() {
+                            if ui.button(
+                                egui::RichText::new("  Create  ").size(14.0)
+                            ).clicked() && !new_branch.is_empty() {
                                 create_branch = true;
                             }
+                            ui.add_space(8.0);
                             if ui.button("Cancel").clicked() {
                                 cancel_dialog = true;
                             }
                         });
+                        ui.add_space(4.0);
                     });
+                if !is_open {
+                    cancel_dialog = true;
+                }
             }
         });
 
@@ -606,6 +680,7 @@ impl App {
                     self.new_branch_name.clear();
                 }
                 WorktreeAction::Delete(_) => tracing::info!("Delete worktree requested"),
+                WorktreeAction::PullRemote => self.pull_remote(),
             }
         }
         if create_branch {
@@ -692,6 +767,15 @@ impl ApplicationHandler<AppEvent> for App {
             }
             AppEvent::PtyExited { session_id, code } => {
                 tracing::info!(session_id, code, "PTY exited");
+            }
+            AppEvent::RemoteUpdatesAvailable { workspace_idx } => {
+                if let Some(ws) = self.workspaces.get_mut(workspace_idx) {
+                    ws.has_remote_updates = true;
+                    tracing::info!(workspace = %ws.name, "Remote updates available");
+                }
+                if let Some(gpu) = &self.gpu {
+                    gpu.window.request_redraw();
+                }
             }
         }
     }
