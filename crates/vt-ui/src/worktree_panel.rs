@@ -35,11 +35,15 @@ pub fn draw_worktree_panel(
         .max_width(400.0)
         .frame(panel_frame)
         .show(ctx, |ui| {
+            // Header row: project name + add + refresh buttons
             ui.horizontal(|ui| {
                 ui.strong(RichText::new(project_name).color(Color32::WHITE));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("R").on_hover_text("Refresh").clicked() {
+                    if ui.small_button("R").on_hover_text("Refresh worktrees").clicked() {
                         action = Some(WorktreeAction::Refresh);
+                    }
+                    if ui.small_button("+").on_hover_text("New worktree").clicked() {
+                        action = Some(WorktreeAction::CreateNew);
                     }
                 });
             });
@@ -68,7 +72,7 @@ pub fn draw_worktree_panel(
                     let text_color = if is_selected {
                         Color32::WHITE
                     } else if is_main {
-                        Color32::from_rgb(114, 159, 207) // blue for main
+                        Color32::from_rgb(114, 159, 207)
                     } else {
                         Color32::from_rgb(200, 200, 200)
                     };
@@ -82,11 +86,9 @@ pub fn draw_worktree_panel(
 
                             ui.add_space(8.0);
 
-                            // Branch icon (ASCII-safe)
                             let icon = if is_main { "*" } else { "-" };
                             ui.label(RichText::new(icon).color(text_color).monospace());
 
-                            // Branch name
                             let resp = ui.selectable_label(
                                 false,
                                 RichText::new(branch_name).color(text_color),
@@ -114,15 +116,6 @@ pub fn draw_worktree_panel(
                     }
                 }
             });
-
-            ui.add_space(8.0);
-
-            if ui
-                .button(RichText::new("+ New Worktree").color(Color32::from_rgb(78, 154, 6)))
-                .clicked()
-            {
-                action = Some(WorktreeAction::CreateNew);
-            }
         });
 
     let panel_width = panel_response.response.rect.width();
