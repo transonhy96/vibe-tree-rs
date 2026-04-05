@@ -300,13 +300,26 @@ impl TerminalRenderer {
             } else {
                 // Normal view: no split
                 self.divider_buffer = None;
-                self.rebuild_lines_absolute(
+
+                // Find first non-empty line to shift content up when screen isn't full
+                let first_content_line = row_data.iter()
+                    .find(|(_, text, _)| text.chars().any(|c| !c.is_whitespace() && c != '\0'))
+                    .map(|(l, _, _)| *l)
+                    .unwrap_or(0);
+                // Shift so first content line appears at top
+                // first_content_line's absolute row = first_content_line + screen_lines - 1
+                // We want that row at y=offset_y, so shift = -(row) * cell_height
+                let content_row = (first_content_line + screen_lines as i32 - 1) as f32;
+                let y_shift = -content_row * self.cell_height;
+
+                self.rebuild_lines_with_shift(
                     &row_data,
                     screen_lines,
                     screen_width,
                     offset_x,
                     offset_y,
                     screen_lines,
+                    y_shift,
                 );
             }
 
@@ -322,10 +335,15 @@ impl TerminalRenderer {
                 let row_in_live = (cursor_line + actual_live as i32 - 1).max(0) as f32;
                 live_start + row_in_live * self.cell_height
             } else {
-                // Normal: same formula as rebuild_lines_absolute
-                // y = offset_y + (cursor_line + screen_lines - 1) * cell_height
+                // Normal: use same shift as rebuild
+                let first_content_line = row_data.iter()
+                    .find(|(_, text, _)| text.chars().any(|c| !c.is_whitespace() && c != '\0'))
+                    .map(|(l, _, _)| *l)
+                    .unwrap_or(0);
+                let content_row = (first_content_line + screen_lines as i32 - 1) as f32;
+                let y_shift = -content_row * self.cell_height;
                 let row = (cursor_line + screen_lines as i32 - 1) as f32;
-                offset_y + row * self.cell_height
+                offset_y + row * self.cell_height + y_shift
             };
             self.cursor_pos = Some((cx, cy));
 
@@ -416,7 +434,6 @@ impl TerminalRenderer {
         );
     }
 
-    /// Rebuild cached lines using absolute grid positions, limited to max_rows.
     fn rebuild_lines_absolute(
         &mut self,
         row_data: &[(i32, String, GlyphonColor)],
@@ -426,19 +443,33 @@ impl TerminalRenderer {
         offset_y: f32,
         max_rows: usize,
     ) {
-        let metrics = Metrics::new(self.font_size, self.cell_height);
+        self.rebuild_lines_with_shift(row_data, screen_lines, screen_width, offset_x, offset_y, max_rows, 0.0);
+    }
 
-        // Always use absolute grid positions.
-        // Line -(screen_lines-1) = top row at offset_y
-        // Line 0 = bottom row at offset_y + (screen_lines-1) * cell_height
-        // y = offset_y + (line + screen_lines - 1) * cell_height
+    /// Rebuild cached lines. y_shift moves all lines up (negative) or down.
+    fn rebuild_lines_with_shift(
+        &mut self,
+        row_data: &[(i32, String, GlyphonColor)],
+        screen_lines: usize,
+        screen_width: u32,
+        offset_x: f32,
+        offset_y: f32,
+        max_rows: usize,
+        y_shift: f32,
+    ) {
+        let metrics = Metrics::new(self.font_size, self.cell_height);
         self.cached_lines.clear();
 
         for (_i, (line, text, color)) in row_data.iter().enumerate() {
             let row = (*line + screen_lines as i32 - 1) as f32;
-            let y = offset_y + row * self.cell_height;
-            // Skip lines outside the allowed region
-            if y < offset_y - self.cell_height || row >= max_rows as f32 {
+            let y = offset_y + row * self.cell_height + y_shift;
+            // Skip lines outside visible area
+            if y < offset_y - self.cell_height || y > offset_y + max_rows as f32 * self.cell_height {
+                continue;
+            }
+            // Skip empty lines (no visible glyphs to shape)
+            let has_content = text.chars().any(|c| !c.is_whitespace() && c != '\0');
+            if !has_content {
                 continue;
             }
 
@@ -466,10 +497,8 @@ impl TerminalRenderer {
         line: i32,
         chars: &[(char, GlyphonColor)],
     ) {
-        let has_content = chars.iter().any(|(c, _)| !c.is_whitespace() && *c != '\0');
-        if !has_content {
-            return;
-        }
+        // Always push the row — don't filter empty lines.
+        // Empty lines produce no visible glyphs but maintain correct positioning.
         let text: String = chars.iter().map(|(c, _)| c).collect();
         let color = chars
             .iter()
