@@ -108,6 +108,7 @@ impl TerminalRenderer {
         let term = term.lock();
         let content = term.renderable_content();
         let screen_lines = term.screen_lines();
+        let display_offset = term.grid().display_offset();
 
         // Build a quick hash of visible content to detect changes
         let mut content_hash: u64 = 0;
@@ -158,7 +159,7 @@ impl TerminalRenderer {
         // Only rebuild buffers if content changed
         if content_hash != self.last_content_hash {
             self.last_content_hash = content_hash;
-            self.rebuild_lines(&row_data, screen_lines, screen_width, screen_height, offset_x, offset_y);
+            self.rebuild_lines(&row_data, screen_lines, display_offset, screen_width, screen_height, offset_x, offset_y);
         }
 
         // Prepare text areas from cache
@@ -196,6 +197,7 @@ impl TerminalRenderer {
         &mut self,
         row_data: &[(i32, String, GlyphonColor)],
         screen_lines: usize,
+        display_offset: usize,
         screen_width: u32,
         screen_height: u32,
         offset_x: f32,
@@ -203,12 +205,21 @@ impl TerminalRenderer {
     ) {
         let metrics = Metrics::new(self.font_size, self.cell_height);
 
-        // Absolute grid positioning:
-        // display_iter lines go from -(screen_lines-1) (top) to 0 (bottom)
-        // y = offset_y + (line + screen_lines) * cell_height
-        // This puts line -(screen_lines-1) at offset_y + cell_height (top)
-        // and line 0 at offset_y + screen_lines * cell_height (bottom)
-        let y_base = offset_y + screen_lines as f32 * self.cell_height;
+        // When not scrolled (display_offset==0) and content doesn't fill screen,
+        // shift content to start at the top. When scrolled or screen is full,
+        // use absolute grid positions.
+        let first_line = row_data.first().map(|(l, _, _)| *l).unwrap_or(0);
+        let last_line = row_data.last().map(|(l, _, _)| *l).unwrap_or(0);
+        let content_rows = (last_line - first_line + 1) as usize;
+        let screen_full = content_rows >= screen_lines;
+
+        let y_base = if display_offset == 0 && !screen_full {
+            // Content doesn't fill screen and not scrolled: start from top
+            offset_y - first_line as f32 * self.cell_height
+        } else {
+            // Screen is full or scrolled: absolute grid positions
+            offset_y + screen_lines as f32 * self.cell_height
+        };
 
         self.cached_lines.clear();
 
