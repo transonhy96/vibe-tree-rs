@@ -159,12 +159,12 @@ impl TerminalRenderer {
             let col = indexed.point.column.0;
             let c = indexed.cell.c;
 
-            // Simple hash
+            // Simple hash (use wrapping casts for negative line indices)
             content_hash = content_hash
                 .wrapping_mul(31)
                 .wrapping_add(c as u64)
                 .wrapping_add(col as u64 * 97)
-                .wrapping_add(line as u64 * 7919);
+                .wrapping_add((line as i64 as u64).wrapping_mul(7919));
 
             if line != current_line {
                 if current_line != i32::MIN {
@@ -190,7 +190,7 @@ impl TerminalRenderer {
         let blink_bit = if self.cursor_active && !self.cursor_blink_visible { 1u64 } else { 0 };
         content_hash = content_hash
             .wrapping_mul(31)
-            .wrapping_add(cursor.point.line.0 as u64 * 13)
+            .wrapping_add((cursor.point.line.0 as i64 as u64).wrapping_mul(13))
             .wrapping_add(cursor.point.column.0 as u64 * 17)
             .wrapping_add(blink_bit);
 
