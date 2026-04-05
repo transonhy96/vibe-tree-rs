@@ -391,24 +391,20 @@ impl App {
         ws.terminals.get(wt_path)
     }
 
-    /// Convert pixel position to terminal grid (col, line).
     /// Convert pixel position to terminal grid coordinates.
     /// Returns (column, line) where Line(0) = top of visible area.
+    /// Clamps to valid range — never returns None for positions near edges.
     fn pixel_to_cell(&self, x: f32, y: f32) -> Option<(usize, i32)> {
         let renderer = self.terminal_renderer.as_ref()?;
         let header = 80.0;
         let sidebar = if self.active_ws().is_some() { self.sidebar_width } else { 0.0 };
-        let term_x = x - sidebar;
-        let term_y = y - header;
-        if term_x < 0.0 || term_y < 0.0 {
-            return None;
-        }
+        let term_x = (x - sidebar).max(0.0);
+        let term_y = (y - header).max(0.0);
         let col = (term_x / renderer.cell_width) as usize;
         let line = (term_y / renderer.cell_height) as i32;
-        // Clamp to valid range
         let max_col = self.terminal_size.0 as usize;
         let max_line = self.terminal_size.1 as i32;
-        Some((col.min(max_col.saturating_sub(1)), line.min(max_line - 1)))
+        Some((col.min(max_col.saturating_sub(1)), line.clamp(0, max_line - 1)))
     }
 
     fn copy_selection(&mut self) {
