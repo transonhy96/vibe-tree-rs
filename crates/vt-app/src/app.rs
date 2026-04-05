@@ -21,6 +21,7 @@ struct Workspace {
     terminals: HashMap<PathBuf, TerminalInstance>,
     has_remote_updates: bool,
     default_branch: Option<String>,
+    sidebar_collapsed: bool,
 }
 
 pub struct App {
@@ -157,6 +158,7 @@ impl App {
             terminals: HashMap::new(),
             has_remote_updates: false,
             default_branch: Some(default_branch.clone()),
+            sidebar_collapsed: false,
         };
         self.workspaces.push(ws);
         let idx = self.workspaces.len() - 1;
@@ -169,6 +171,7 @@ impl App {
         if !self.workspaces[idx].worktrees.is_empty() {
             self.select_worktree(0);
         }
+        self.save_state();
     }
 
     fn close_workspace(&mut self, idx: usize) {
@@ -179,6 +182,38 @@ impl App {
             self.active_workspace_idx = None;
         } else {
             self.active_workspace_idx = Some(idx.min(self.workspaces.len() - 1));
+        }
+        self.save_state();
+    }
+
+    fn save_state(&mut self) {
+        self.config.workspace_state.open_paths = self.workspaces.iter()
+            .map(|ws| ws.path.clone())
+            .collect();
+        self.config.workspace_state.active_index = self.active_workspace_idx;
+        if let Err(e) = self.config.save() {
+            tracing::error!("Failed to save config: {}", e);
+        }
+    }
+
+    fn restore_workspaces(&mut self) {
+        let paths = self.config.workspace_state.open_paths.clone();
+        let active = self.config.workspace_state.active_index;
+        for path in paths {
+            if path.is_dir() {
+                self.open_workspace(path);
+            }
+        }
+        if let Some(idx) = active {
+            if idx < self.workspaces.len() {
+                self.active_workspace_idx = Some(idx);
+                // Select the first worktree in the restored active workspace
+                if let Some(ws) = self.workspaces.get(idx) {
+                    if !ws.worktrees.is_empty() && ws.selected_worktree_idx.is_none() {
+                        self.select_worktree(0);
+                    }
+                }
+            }
         }
     }
 
@@ -333,7 +368,7 @@ impl App {
 
     fn calc_terminal_size(&self, w: f32, h: f32, cw: f32, ch: f32) -> (u16, u16) {
         let header = 80.0_f32; // tabs + header
-        let sidebar = if self.active_ws().is_some() { self.sidebar_width + 10.0 } else { 0.0 };
+        let sidebar = if self.active_ws().is_some() { self.sidebar_width } else { 0.0 };
         let cols = ((w - sidebar).max(cw) / cw).floor() as u16;
         let rows = ((h - header).max(ch) / ch).floor() as u16;
         (cols.max(2), rows.max(1))
@@ -392,6 +427,7 @@ impl App {
         let term_size = self.terminal_size;
         let has_terminal = self.active_terminal().is_some();
         let has_remote_updates = self.active_ws().map(|ws| ws.has_remote_updates).unwrap_or(false);
+        let sidebar_collapsed = self.active_ws().map(|ws| ws.sidebar_collapsed).unwrap_or(false);
         let show_new_branch = self.show_new_branch_dialog;
         let mut new_branch = self.new_branch_name.clone();
         let show_open_project = self.show_open_project_dialog;
@@ -412,50 +448,7 @@ impl App {
             let panel_frame = egui::Frame::new().fill(egui::Color32::from_rgb(30, 30, 30));
             let tab_frame = egui::Frame::new().fill(egui::Color32::from_rgb(24, 24, 24));
 
-            // Workspace tab bar (top-most)
-            egui::TopBottomPanel::top("workspace_tabs")
-                .frame(tab_frame)
-                .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        for (i, name) in ws_names.iter().enumerate() {
-                            let is_active = active_ws_idx == Some(i);
-                            let bg = if is_active {
-                                egui::Color32::from_rgb(45, 45, 48)
-                            } else {
-                                egui::Color32::from_rgb(30, 30, 30)
-                            };
-                            let text_color = if is_active {
-                                egui::Color32::WHITE
-                            } else {
-                                egui::Color32::from_rgb(150, 150, 150)
-                            };
-
-                            let tab = ui.horizontal(|ui| {
-                                ui.painter().rect_filled(
-                                    ui.max_rect(), 0.0, bg,
-                                );
-                                let resp = ui.selectable_label(
-                                    is_active,
-                                    egui::RichText::new(name).color(text_color),
-                                );
-                                if resp.clicked() {
-                                    switch_ws = Some(i);
-                                }
-                                // Close button
-                                if ui.small_button("x").clicked() {
-                                    close_ws = Some(i);
-                                }
-                            });
-                            ui.separator();
-                        }
-
-                        if ui.small_button("+").on_hover_text("Open project").clicked() {
-                            open_project = true;
-                        }
-                    });
-                });
-
-            // Header bar
+            // Header bar (top-most)
             egui::TopBottomPanel::top("header")
                 .frame(panel_frame)
                 .show(ctx, |ui| {
@@ -475,9 +468,43 @@ impl App {
                     });
                 });
 
+            // Workspace tab bar (below header)
+            egui::TopBottomPanel::top("workspace_tabs")
+                .frame(tab_frame)
+                .show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        for (i, name) in ws_names.iter().enumerate() {
+                            let is_active = active_ws_idx == Some(i);
+                            let text_color = if is_active {
+                                egui::Color32::WHITE
+                            } else {
+                                egui::Color32::from_rgb(150, 150, 150)
+                            };
+
+                            ui.horizontal(|ui| {
+                                let resp = ui.selectable_label(
+                                    is_active,
+                                    egui::RichText::new(name).color(text_color),
+                                );
+                                if resp.clicked() {
+                                    switch_ws = Some(i);
+                                }
+                                if ui.small_button("x").clicked() {
+                                    close_ws = Some(i);
+                                }
+                            });
+                            ui.separator();
+                        }
+
+                        if ui.small_button("+").on_hover_text("Open project").clicked() {
+                            open_project = true;
+                        }
+                    });
+                });
+
             // Worktree sidebar (only when workspace is open)
             if has_workspace {
-                wt_result = Some(draw_worktree_panel(ctx, &worktrees, selected_wt_idx, &project_name, has_remote_updates));
+                wt_result = Some(draw_worktree_panel(ctx, &worktrees, selected_wt_idx, &project_name, has_remote_updates, sidebar_collapsed));
             }
 
             // Central panel
@@ -608,16 +635,35 @@ impl App {
             pixels_per_point: full_output.pixels_per_point,
         };
 
-        // Update sidebar width from panel result
+        // Update sidebar width from panel result and resize terminal if needed
         if let Some(ref result) = wt_result {
+            let old_width = self.sidebar_width;
             self.sidebar_width = result.panel_width;
+            if (old_width - result.panel_width).abs() > 1.0 {
+                // Sidebar resized — recalculate terminal cols
+                if let Some((cw, ch)) = self.terminal_renderer.as_ref()
+                    .map(|r| (r.cell_width, r.cell_height))
+                {
+                    let new_size = self.calc_terminal_size(
+                        gpu.config.width as f32, gpu.config.height as f32, cw, ch,
+                    );
+                    if new_size != self.terminal_size {
+                        self.terminal_size = new_size;
+                        for ws in &mut self.workspaces {
+                            for t in ws.terminals.values_mut() {
+                                t.resize(new_size.0, new_size.1);
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Prepare terminal text
         let active_term = self.active_terminal().map(|t| t.term.clone());
         if let Some(term) = &active_term {
             if let Some(renderer) = &mut self.terminal_renderer {
-                let term_offset_x = if has_workspace { self.sidebar_width + 10.0 } else { 0.0 };
+                let term_offset_x = if has_workspace { self.sidebar_width } else { 0.0 };
                 renderer.prepare(term, &gpu.device, &gpu.queue,
                     gpu.config.width, gpu.config.height, term_offset_x, 80.0);
             }
@@ -669,7 +715,10 @@ impl App {
                 self.open_workspace(path);
             }
         }
-        if let Some(idx) = switch_ws { self.active_workspace_idx = Some(idx); }
+        if let Some(idx) = switch_ws {
+            self.active_workspace_idx = Some(idx);
+            self.save_state();
+        }
         if let Some(idx) = close_ws { self.close_workspace(idx); }
         if let Some(action) = wt_result.and_then(|r| r.action) {
             match action {
@@ -681,6 +730,11 @@ impl App {
                 }
                 WorktreeAction::Delete(_) => tracing::info!("Delete worktree requested"),
                 WorktreeAction::PullRemote => self.pull_remote(),
+                WorktreeAction::ToggleCollapse => {
+                    if let Some(ws) = self.active_ws_mut() {
+                        ws.sidebar_collapsed = !ws.sidebar_collapsed;
+                    }
+                }
             }
         }
         if create_branch {
@@ -703,7 +757,8 @@ impl ApplicationHandler<AppEvent> for App {
             Ok(window) => {
                 let window = Arc::new(window);
                 self.initialize_gpu(window);
-                // Start with welcome screen — no workspace open
+                // Restore previously open workspaces
+                self.restore_workspaces();
             }
             Err(e) => tracing::error!("Window creation failed: {}", e),
         }
@@ -725,6 +780,7 @@ impl ApplicationHandler<AppEvent> for App {
 
         match event {
             WindowEvent::CloseRequested => {
+                self.save_state();
                 self.workspaces.clear();
                 event_loop.exit();
             }

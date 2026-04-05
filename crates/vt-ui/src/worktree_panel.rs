@@ -8,6 +8,7 @@ pub enum WorktreeAction {
     Delete(usize),
     Refresh,
     PullRemote,
+    ToggleCollapse,
 }
 
 /// Result from drawing the worktree panel.
@@ -23,12 +24,28 @@ pub fn draw_worktree_panel(
     selected_idx: Option<usize>,
     project_name: &str,
     has_remote_updates: bool,
+    collapsed: bool,
 ) -> WorktreePanelResult {
     let mut action = None;
 
     let panel_frame = egui::Frame::new()
         .fill(Color32::from_rgb(37, 37, 38))
         .inner_margin(egui::Margin::same(8));
+
+    if collapsed {
+        // Collapsed: thin panel with just expand button
+        let panel_response = egui::SidePanel::left("worktree_panel")
+            .resizable(false)
+            .exact_width(32.0)
+            .frame(panel_frame)
+            .show(ctx, |ui| {
+                if ui.button(">").on_hover_text("Expand sidebar").clicked() {
+                    action = Some(WorktreeAction::ToggleCollapse);
+                }
+            });
+        let panel_width = panel_response.response.rect.width();
+        return WorktreePanelResult { action, panel_width };
+    }
 
     let panel_response = egui::SidePanel::left("worktree_panel")
         .resizable(true)
@@ -37,9 +54,8 @@ pub fn draw_worktree_panel(
         .max_width(400.0)
         .frame(panel_frame)
         .show(ctx, |ui| {
-            // Header row: project name + add + refresh buttons
+            // Header row: action buttons only
             ui.horizontal(|ui| {
-                ui.strong(RichText::new(project_name).color(Color32::WHITE));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // Pull/sync button — glows green when remote has updates
                     let pull_color = if has_remote_updates {
@@ -64,6 +80,11 @@ pub fn draw_worktree_panel(
                     }
                     if ui.small_button("+").on_hover_text("New worktree").clicked() {
                         action = Some(WorktreeAction::CreateNew);
+                    }
+                    // Collapse button (leftmost in right-to-left layout)
+                    let collapse_icon = if collapsed { ">" } else { "<" };
+                    if ui.small_button(collapse_icon).on_hover_text("Toggle sidebar").clicked() {
+                        action = Some(WorktreeAction::ToggleCollapse);
                     }
                 });
             });

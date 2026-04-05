@@ -23,11 +23,19 @@ impl Default for TerminalSettings {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WorkspaceState {
+    pub open_paths: Vec<PathBuf>,
+    pub active_index: Option<usize>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     pub theme: Theme,
     pub terminal: TerminalSettings,
     pub recent_projects: Vec<PathBuf>,
+    #[serde(default)]
+    pub workspace_state: WorkspaceState,
 }
 
 impl Default for AppConfig {
@@ -36,6 +44,7 @@ impl Default for AppConfig {
             theme: Theme::Dark,
             terminal: TerminalSettings::default(),
             recent_projects: Vec::new(),
+            workspace_state: WorkspaceState::default(),
         }
     }
 }
