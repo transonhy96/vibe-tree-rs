@@ -54,6 +54,7 @@ pub struct App {
     wants_quit: bool,
     mouse_selecting: bool,
     last_mouse_cell: Option<(usize, i32)>,
+    last_mouse_pos: (f32, f32),
     show_context_menu: bool,
     context_menu_pos: egui::Pos2,
     clipboard: Option<arboard::Clipboard>,
@@ -88,6 +89,7 @@ impl App {
             wants_quit: false,
             mouse_selecting: false,
             last_mouse_cell: None,
+            last_mouse_pos: (0.0, 0.0),
             show_context_menu: false,
             context_menu_pos: egui::Pos2::ZERO,
             clipboard: arboard::Clipboard::new().ok(),
@@ -614,6 +616,7 @@ impl App {
         let mut terminal_mouse_drag: Option<egui::Pos2> = None;
         let mut terminal_mouse_up = false;
         let mut terminal_clear = false;
+        let mut close_ctx_menu = false;
         let mut wt_result: Option<WorktreePanelResult> = None;
         let mut portal_result: Option<PortalPanelResult> = None;
         let mut create_branch = false;
@@ -825,7 +828,38 @@ impl App {
                 }
             }
 
-            // Old context menu removed — now using egui's resp.context_menu()
+            // Right-click context menu (positioned at cursor)
+            if show_ctx_menu {
+                let menu_pos = egui::Pos2::new(
+                    self.last_mouse_pos.0,
+                    self.last_mouse_pos.1,
+                );
+                egui::Area::new(egui::Id::new("terminal_context_menu"))
+                    .fixed_pos(menu_pos)
+                    .order(egui::Order::Foreground)
+                    .show(ctx, |ui| {
+                        egui::Frame::new()
+                            .fill(egui::Color32::from_rgb(50, 50, 54))
+                            .inner_margin(egui::Margin::same(6))
+                            .corner_radius(4.0)
+                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 80, 80)))
+                            .show(ui, |ui| {
+                                if ui.button("  Copy   Ctrl+Shift+C").clicked() {
+                                    ctx_copy = true;
+                                    close_ctx_menu = true;
+                                }
+                                if ui.button("  Paste  Ctrl+Shift+V").clicked() {
+                                    ctx_paste = true;
+                                    close_ctx_menu = true;
+                                }
+                                ui.separator();
+                                if ui.button("  Clear terminal").clicked() {
+                                    terminal_clear = true;
+                                    close_ctx_menu = true;
+                                }
+                            });
+                    });
+            }
         });
 
         self.new_branch_name = new_branch;
@@ -956,9 +990,14 @@ impl App {
         if cancel_dialog { self.show_new_branch_dialog = false; }
         if ctx_copy {
             self.copy_selection();
+            self.show_context_menu = false;
         }
         if ctx_paste {
             self.paste_clipboard();
+            self.show_context_menu = false;
+        }
+        if close_ctx_menu {
+            self.show_context_menu = false;
         }
         if terminal_scroll != 0 {
             if let Some(terminal) = self.active_terminal() {
@@ -1057,8 +1096,9 @@ impl ApplicationHandler<AppEvent> for App {
                 if *button == MouseButton::Left {
                     if *state == ElementState::Pressed {
                         self.mouse_selecting = true;
-                        // Get cursor position from last known
+                        self.show_context_menu = false;
                         if let Some((col, line)) = self.last_mouse_cell {
+                            tracing::debug!(col, line, "Selection start");
                             if let Some(terminal) = self.active_terminal() {
                                 terminal.start_selection(col, line);
                             }
@@ -1068,11 +1108,23 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                     if let Some(gpu) = &self.gpu { gpu.window.request_redraw(); }
                 }
+                if *button == MouseButton::Right && *state == ElementState::Pressed {
+                    self.show_context_menu = true;
+                    if let Some(gpu) = &self.gpu {
+                        let scale = gpu.window.scale_factor() as f32;
+                        // Store position from last cursor move
+                        if let Some((col, _)) = self.last_mouse_cell {
+                            // Use raw cursor position for context menu
+                        }
+                        gpu.window.request_redraw();
+                    }
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let scale = self.gpu.as_ref().map(|g| g.window.scale_factor()).unwrap_or(1.0) as f32;
                 let x = position.x as f32 / scale;
                 let y = position.y as f32 / scale;
+                self.last_mouse_pos = (x, y);
                 self.last_mouse_cell = self.pixel_to_cell(x, y);
                 if self.mouse_selecting {
                     if let Some((col, line)) = self.last_mouse_cell {
