@@ -1,0 +1,122 @@
+use alacritty_terminal::event::{Event as TermEvent, EventListener, WindowSize};
+use alacritty_terminal::event_loop::{EventLoop as PtyEventLoop, EventLoopSender, Msg};
+use std::collections::HashMap;
+use alacritty_terminal::sync::FairMutex;
+use alacritty_terminal::term::test::TermSize;
+use alacritty_terminal::term::{self, Term};
+use alacritty_terminal::tty;
+use std::borrow::Cow;
+use std::path::Path;
+use std::sync::Arc;
+use std::thread::JoinHandle;
+
+/// Forwards terminal events to a channel.
+#[derive(Clone)]
+pub struct EventProxy {
+    sender: std::sync::mpsc::Sender<TermEvent>,
+}
+
+impl EventListener for EventProxy {
+    fn send_event(&self, event: TermEvent) {
+        let _ = self.sender.send(event);
+    }
+}
+
+pub struct TerminalInstance {
+    pub term: Arc<FairMutex<Term<EventProxy>>>,
+    notifier: EventLoopSender,
+    pub dirty: bool,
+    event_rx: std::sync::mpsc::Receiver<TermEvent>,
+    _pty_thread: JoinHandle<()>,
+}
+
+impl TerminalInstance {
+    pub fn new(cols: u16, rows: u16, cwd: &Path) -> Self {
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let event_proxy = EventProxy { sender: event_tx };
+
+        let term_size = TermSize::new(cols as usize, rows as usize);
+        let term = Term::new(term::Config::default(), &term_size, event_proxy.clone());
+        let term = Arc::new(FairMutex::new(term));
+
+        let window_size = WindowSize {
+            num_cols: cols,
+            num_lines: rows,
+            cell_width: 1,
+            cell_height: 1,
+        };
+
+        let shell = Self::default_shell();
+        let mut env = HashMap::new();
+        env.insert("TERM".to_string(), "xterm-256color".to_string());
+
+        let pty_config = tty::Options {
+            shell: Some(tty::Shell::new(shell, Vec::new())),
+            working_directory: Some(cwd.to_path_buf()),
+            drain_on_exit: true,
+            env,
+        };
+
+        let pty = tty::new(&pty_config, window_size, 0).expect("failed to create PTY");
+
+        let event_loop =
+            PtyEventLoop::new(term.clone(), event_proxy, pty, pty_config.drain_on_exit, false)
+                .expect("failed to create event loop");
+
+        let notifier = event_loop.channel();
+
+        // Spawn the PTY event loop thread
+        let pty_thread = std::thread::spawn(move || {
+            let _ = event_loop.spawn().join();
+        });
+
+        Self {
+            term,
+            notifier,
+            dirty: true,
+            event_rx,
+            _pty_thread: pty_thread,
+        }
+    }
+
+    /// Process any pending terminal events (title changes, etc.)
+    pub fn process_events(&mut self) {
+        while let Ok(_event) = self.event_rx.try_recv() {
+            self.dirty = true;
+        }
+    }
+
+    /// Send input bytes to the PTY.
+    pub fn write(&self, data: &[u8]) {
+        let _ = self.notifier.send(Msg::Input(Cow::Owned(data.to_vec())));
+    }
+
+    /// Resize the terminal.
+    pub fn resize(&mut self, cols: u16, rows: u16) {
+        let window_size = WindowSize {
+            num_cols: cols,
+            num_lines: rows,
+            cell_width: 1,
+            cell_height: 1,
+        };
+        let _ = self.notifier.send(Msg::Resize(window_size));
+
+        let term_size = TermSize::new(cols as usize, rows as usize);
+        self.term.lock().resize(term_size);
+        self.dirty = true;
+    }
+
+    fn default_shell() -> String {
+        if cfg!(target_os = "windows") {
+            "powershell.exe".to_string()
+        } else {
+            std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string())
+        }
+    }
+}
+
+impl Drop for TerminalInstance {
+    fn drop(&mut self) {
+        let _ = self.notifier.send(Msg::Shutdown);
+    }
+}

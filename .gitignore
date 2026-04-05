@@ -65,3 +65,4 @@ packages/server/.env
 # E2E test exit status file
 **/.exit-status
 
+target/

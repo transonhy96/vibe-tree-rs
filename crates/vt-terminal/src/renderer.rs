@@ -1,0 +1,219 @@
+use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::sync::FairMutex;
+use alacritty_terminal::term::Term;
+use alacritty_terminal::vte::ansi::{Color as TermColor, NamedColor};
+use glyphon::{
+    Attrs, Buffer as GlyphonBuffer, Cache, Color as GlyphonColor, Family, FontSystem, Metrics,
+    Resolution, Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+};
+use std::sync::Arc;
+use wgpu;
+
+use crate::instance::EventProxy;
+
+pub struct TerminalRenderer {
+    pub font_system: FontSystem,
+    pub swash_cache: SwashCache,
+    pub text_atlas: TextAtlas,
+    pub text_renderer: TextRenderer,
+    pub viewport: Viewport,
+    _cache: Cache,
+    pub cell_width: f32,
+    pub cell_height: f32,
+    font_size: f32,
+}
+
+impl TerminalRenderer {
+    pub fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface_format: wgpu::TextureFormat,
+        font_size: f32,
+    ) -> Self {
+        let font_system = FontSystem::new();
+        let swash_cache = SwashCache::new();
+        let cache = Cache::new(device);
+        let mut text_atlas = TextAtlas::new(device, queue, &cache, surface_format);
+        let text_renderer = TextRenderer::new(
+            &mut text_atlas,
+            device,
+            wgpu::MultisampleState::default(),
+            None,
+        );
+        let viewport = Viewport::new(device, &cache);
+
+        // Approximate cell dimensions for monospace font
+        let cell_width = font_size * 0.6;
+        let cell_height = font_size * 1.2;
+
+        Self {
+            font_system,
+            swash_cache,
+            text_atlas,
+            text_renderer,
+            viewport,
+            _cache: cache,
+            cell_width,
+            cell_height,
+            font_size,
+        }
+    }
+
+    /// Prepare terminal content for rendering. Call before render_pass().
+    pub fn prepare(
+        &mut self,
+        term: &Arc<FairMutex<Term<EventProxy>>>,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        screen_width: u32,
+        screen_height: u32,
+        offset_x: f32,
+        offset_y: f32,
+    ) {
+        // Update viewport resolution
+        self.viewport.update(
+            queue,
+            Resolution {
+                width: screen_width,
+                height: screen_height,
+            },
+        );
+
+        let term = term.lock();
+        let content = term.renderable_content();
+        let screen_lines = term.screen_lines();
+
+        let metrics = Metrics::new(self.font_size, self.cell_height);
+
+        // Collect all text into a single buffer (line by line)
+        let mut line_texts: Vec<(f32, f32, String, GlyphonColor)> = Vec::new();
+
+        for indexed in content.display_iter {
+            let c = indexed.cell.c;
+            if c == ' ' || c == '\0' {
+                continue;
+            }
+
+            let x = offset_x + indexed.point.column.0 as f32 * self.cell_width;
+            let y = offset_y + (indexed.point.line.0 as f32 + screen_lines as f32) * self.cell_height;
+            let fg = self.resolve_color(indexed.cell.fg);
+
+            line_texts.push((x, y, c.to_string(), fg));
+        }
+        drop(term);
+
+        // Build text areas from collected data
+        let mut buffers: Vec<GlyphonBuffer> = Vec::with_capacity(line_texts.len());
+        for (_, _, text, color) in &line_texts {
+            let mut buf = GlyphonBuffer::new(&mut self.font_system, metrics);
+            buf.set_text(
+                &mut self.font_system,
+                text,
+                Attrs::new().family(Family::Monospace).color(*color),
+                Shaping::Basic,
+            );
+            buf.shape_until_scroll(&mut self.font_system, false);
+            buffers.push(buf);
+        }
+
+        let text_areas: Vec<TextArea<'_>> = line_texts
+            .iter()
+            .zip(buffers.iter())
+            .map(|((x, y, _, color), buf)| TextArea {
+                buffer: buf,
+                left: *x,
+                top: *y,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: *x as i32,
+                    top: *y as i32,
+                    right: (*x + self.cell_width) as i32,
+                    bottom: (*y + self.cell_height) as i32,
+                },
+                default_color: *color,
+                custom_glyphs: &[],
+            })
+            .collect();
+
+        let _ = self.text_renderer.prepare(
+            device,
+            queue,
+            &mut self.font_system,
+            &mut self.text_atlas,
+            &self.viewport,
+            text_areas,
+            &mut self.swash_cache,
+        );
+    }
+
+    fn resolve_color(&self, color: TermColor) -> GlyphonColor {
+        match color {
+            TermColor::Named(named) => named_to_rgb(named),
+            TermColor::Spec(rgb) => GlyphonColor::rgb(rgb.r, rgb.g, rgb.b),
+            TermColor::Indexed(idx) => indexed_to_rgb(idx),
+        }
+    }
+
+    /// Render the prepared text into the given render pass.
+    pub fn render_pass<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
+        let _ = self.text_renderer.render(&self.text_atlas, &self.viewport, render_pass);
+    }
+}
+
+fn named_to_rgb(color: NamedColor) -> GlyphonColor {
+    match color {
+        NamedColor::Black => GlyphonColor::rgb(0, 0, 0),
+        NamedColor::Red => GlyphonColor::rgb(204, 0, 0),
+        NamedColor::Green => GlyphonColor::rgb(78, 154, 6),
+        NamedColor::Yellow => GlyphonColor::rgb(196, 160, 0),
+        NamedColor::Blue => GlyphonColor::rgb(52, 101, 164),
+        NamedColor::Magenta => GlyphonColor::rgb(117, 80, 123),
+        NamedColor::Cyan => GlyphonColor::rgb(6, 152, 154),
+        NamedColor::White => GlyphonColor::rgb(211, 215, 207),
+        NamedColor::BrightBlack => GlyphonColor::rgb(85, 87, 83),
+        NamedColor::BrightRed => GlyphonColor::rgb(239, 41, 41),
+        NamedColor::BrightGreen => GlyphonColor::rgb(138, 226, 52),
+        NamedColor::BrightYellow => GlyphonColor::rgb(252, 233, 79),
+        NamedColor::BrightBlue => GlyphonColor::rgb(114, 159, 207),
+        NamedColor::BrightMagenta => GlyphonColor::rgb(173, 127, 168),
+        NamedColor::BrightCyan => GlyphonColor::rgb(52, 226, 226),
+        NamedColor::BrightWhite => GlyphonColor::rgb(238, 238, 236),
+        NamedColor::Foreground => GlyphonColor::rgb(211, 215, 207),
+        NamedColor::Background => GlyphonColor::rgb(30, 30, 30),
+        _ => GlyphonColor::rgb(211, 215, 207),
+    }
+}
+
+fn indexed_to_rgb(idx: u8) -> GlyphonColor {
+    if idx < 16 {
+        let named = match idx {
+            0 => NamedColor::Black,
+            1 => NamedColor::Red,
+            2 => NamedColor::Green,
+            3 => NamedColor::Yellow,
+            4 => NamedColor::Blue,
+            5 => NamedColor::Magenta,
+            6 => NamedColor::Cyan,
+            7 => NamedColor::White,
+            8 => NamedColor::BrightBlack,
+            9 => NamedColor::BrightRed,
+            10 => NamedColor::BrightGreen,
+            11 => NamedColor::BrightYellow,
+            12 => NamedColor::BrightBlue,
+            13 => NamedColor::BrightMagenta,
+            14 => NamedColor::BrightCyan,
+            15 => NamedColor::BrightWhite,
+            _ => unreachable!(),
+        };
+        named_to_rgb(named)
+    } else if idx < 232 {
+        let idx = idx - 16;
+        let r = (idx / 36) * 51;
+        let g = ((idx % 36) / 6) * 51;
+        let b = (idx % 6) * 51;
+        GlyphonColor::rgb(r, g, b)
+    } else {
+        let val = 8 + (idx - 232) * 10;
+        GlyphonColor::rgb(val, val, val)
+    }
+}

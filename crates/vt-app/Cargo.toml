@@ -1,0 +1,21 @@
+[package]
+name = "vt-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vt-core = { path = "../vt-core" }
+vt-git = { path = "../vt-git" }
+vt-pty = { path = "../vt-pty" }
+vt-terminal = { path = "../vt-terminal" }
+vt-ui = { path = "../vt-ui" }
+winit = { workspace = true }
+wgpu = { workspace = true }
+egui = { workspace = true }
+egui-wgpu = { workspace = true }
+egui-winit = { workspace = true }
+tokio = { workspace = true }
+rfd = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }

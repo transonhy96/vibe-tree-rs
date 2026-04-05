@@ -1,0 +1,57 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/vt-core",
+    "crates/vt-git",
+    "crates/vt-pty",
+    "crates/vt-terminal",
+    "crates/vt-ui",
+    "crates/vt-app",
+]
+
+[workspace.dependencies]
+# Windowing + GPU
+winit = "0.30"
+wgpu = "24"
+
+# UI chrome
+egui = "0.31"
+egui-wgpu = "0.31"
+egui-winit = "0.31"
+
+# Terminal emulation
+alacritty_terminal = "0.25"
+
+# Text rendering
+glyphon = "0.8"
+
+# PTY
+portable-pty = "0.8"
+
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# File dialogs
+rfd = "0.15"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Misc
+dirs = "6"
+sha2 = "0.10"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

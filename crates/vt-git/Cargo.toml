@@ -1,0 +1,10 @@
+[package]
+name = "vt-git"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vt-core = { path = "../vt-core" }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
