@@ -328,9 +328,9 @@ impl App {
             });
         });
 
-        // Central panel — transparent fill so GPU-rendered terminal text shows through
+        // Central panel — completely invisible so GPU-rendered terminal shows through
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
+            .frame(egui::Frame::NONE)
             .show(ctx, |_ui| {});
     }
 }

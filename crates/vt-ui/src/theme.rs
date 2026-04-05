@@ -23,7 +23,8 @@ impl ThemeColors {
                 tab_inactive: Color32::from_rgb(37, 37, 38),
                 accent: Color32::from_rgb(66, 133, 244),
                 border: Color32::from_rgb(60, 60, 60),
-                terminal_bg: [0.118, 0.118, 0.118, 1.0],
+                // sRGB(30,30,30) → linear ≈ 0.011
+                terminal_bg: [0.011, 0.011, 0.011, 1.0],
             },
             Theme::Light => Self {
                 bg: Color32::from_rgb(255, 255, 255),
@@ -43,9 +44,11 @@ impl ThemeColors {
             Theme::Dark => Visuals::dark(),
             Theme::Light => Visuals::light(),
         };
-        // Only make panel_fill transparent — CentralPanel uses this.
-        // TopBottomPanel/SidePanel will override with explicit frames.
+        // Make panel/window fills transparent so GPU-rendered terminal shows through.
+        // TopBottomPanel/SidePanel override with explicit opaque frames.
         visuals.panel_fill = Color32::TRANSPARENT;
+        visuals.window_fill = Color32::TRANSPARENT;
+        visuals.extreme_bg_color = Color32::TRANSPARENT;
         ctx.set_visuals(visuals);
     }
 }
