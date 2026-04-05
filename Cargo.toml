@@ -51,6 +51,10 @@ thiserror = "2"
 dirs = "6"
 sha2 = "0.10"
 
+# Fast debug builds — optimize deps but keep app code debuggable
+[profile.dev.package."*"]
+opt-level = 2
+
 [profile.release]
 lto = true
 codegen-units = 1

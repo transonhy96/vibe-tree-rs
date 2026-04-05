@@ -32,7 +32,7 @@ pub fn draw_worktree_panel(
             ui.horizontal(|ui| {
                 ui.strong(RichText::new(project_name).color(Color32::WHITE));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("⟳").on_hover_text("Refresh").clicked() {
+                    if ui.small_button("R").on_hover_text("Refresh").clicked() {
                         action = Some(WorktreeAction::Refresh);
                     }
                 });
@@ -76,9 +76,9 @@ pub fn draw_worktree_panel(
 
                             ui.add_space(8.0);
 
-                            // Branch icon
-                            let icon = if is_main { "◆" } else { "○" };
-                            ui.label(RichText::new(icon).color(text_color).size(10.0));
+                            // Branch icon (ASCII-safe)
+                            let icon = if is_main { "*" } else { "-" };
+                            ui.label(RichText::new(icon).color(text_color).monospace());
 
                             // Branch name
                             let resp = ui.selectable_label(
