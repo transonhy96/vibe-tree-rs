@@ -1,6 +1,8 @@
 use alacritty_terminal::event::{Event as TermEvent, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop as PtyEventLoop, EventLoopSender, Msg};
 use alacritty_terminal::grid::Scroll;
+use alacritty_terminal::index::{Column, Direction, Line, Point};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{self, Term};
@@ -129,6 +131,34 @@ impl TerminalInstance {
             }
         }
         lines.join("\n")
+    }
+
+    /// Start a text selection at the given terminal grid position.
+    pub fn start_selection(&self, col: usize, line: i32) {
+        let point = Point::new(Line(line), Column(col));
+        let mut term = self.term.lock();
+        term.selection = Some(Selection::new(SelectionType::Simple, point, Direction::Left));
+    }
+
+    /// Update the selection to extend to the given position.
+    pub fn update_selection(&self, col: usize, line: i32) {
+        let point = Point::new(Line(line), Column(col));
+        let mut term = self.term.lock();
+        if let Some(ref mut sel) = term.selection {
+            sel.update(point, Direction::Right);
+        }
+    }
+
+    /// Clear any active selection.
+    pub fn clear_selection(&self) {
+        let mut term = self.term.lock();
+        term.selection = None;
+    }
+
+    /// Get the selected text, if any.
+    pub fn selected_text(&self) -> Option<String> {
+        let term = self.term.lock();
+        term.selection_to_string()
     }
 
     /// Scroll the terminal display.

@@ -52,6 +52,10 @@ pub struct App {
     open_project_error: Option<String>,
     sidebar_width: f32,
     wants_quit: bool,
+    mouse_selecting: bool,
+    show_context_menu: bool,
+    context_menu_pos: egui::Pos2,
+    clipboard: Option<arboard::Clipboard>,
 }
 
 impl App {
@@ -81,6 +85,10 @@ impl App {
             open_project_error: None,
             sidebar_width: 200.0,
             wants_quit: false,
+            mouse_selecting: false,
+            show_context_menu: false,
+            context_menu_pos: egui::Pos2::ZERO,
+            clipboard: arboard::Clipboard::new().ok(),
         }
     }
 
@@ -379,6 +387,45 @@ impl App {
         ws.terminals.get(wt_path)
     }
 
+    /// Convert pixel position to terminal grid (col, line).
+    fn pixel_to_cell(&self, x: f32, y: f32) -> Option<(usize, i32)> {
+        let renderer = self.terminal_renderer.as_ref()?;
+        let header = 80.0;
+        let sidebar = if self.active_ws().is_some() { self.sidebar_width } else { 0.0 };
+        let term_x = x - sidebar;
+        let term_y = y - header;
+        if term_x < 0.0 || term_y < 0.0 {
+            return None;
+        }
+        let col = (term_x / renderer.cell_width) as usize;
+        let row = (term_y / renderer.cell_height) as i32;
+        // Convert screen row to alacritty line index
+        let screen_lines = self.terminal_size.1 as i32;
+        let line = row - screen_lines + 1; // line 0 = bottom, -(n-1) = top
+        Some((col, line))
+    }
+
+    fn copy_selection(&mut self) {
+        if let Some(terminal) = self.active_terminal() {
+            if let Some(text) = terminal.selected_text() {
+                if let Some(cb) = &mut self.clipboard {
+                    let _ = cb.set_text(&text);
+                    tracing::debug!("Copied: {}", text.chars().take(50).collect::<String>());
+                }
+            }
+        }
+    }
+
+    fn paste_clipboard(&mut self) {
+        let text = self.clipboard.as_mut()
+            .and_then(|cb| cb.get_text().ok());
+        if let Some(text) = text {
+            if let Some(terminal) = self.active_terminal() {
+                terminal.write(text.as_bytes());
+            }
+        }
+    }
+
     #[cfg(target_os = "linux")]
     fn get_native_window_id(&self) -> Option<u64> {
         use raw_window_handle::HasWindowHandle;
@@ -539,6 +586,8 @@ impl App {
         let show_new_branch = self.show_new_branch_dialog;
         let mut new_branch = self.new_branch_name.clone();
         let show_open_project = self.show_open_project_dialog;
+        let show_ctx_menu = self.show_context_menu;
+        let ctx_menu_pos = self.context_menu_pos;
         let mut project_path_input = self.open_project_path.clone();
         let open_project_err = self.open_project_error.clone();
 
@@ -547,6 +596,8 @@ impl App {
         let mut confirm_open_project = false;
         let mut cancel_open_project = false;
         let mut quit = false;
+        let mut ctx_copy = false;
+        let mut ctx_paste = false;
         let mut wt_result: Option<WorktreePanelResult> = None;
         let mut portal_result: Option<PortalPanelResult> = None;
         let mut create_branch = false;
@@ -755,6 +806,27 @@ impl App {
                     cancel_dialog = true;
                 }
             }
+
+            // Right-click context menu
+            if show_ctx_menu {
+                egui::Area::new(egui::Id::new("terminal_context_menu"))
+                    .fixed_pos(ctx_menu_pos)
+                    .order(egui::Order::Foreground)
+                    .show(ctx, |ui| {
+                        egui::Frame::new()
+                            .fill(egui::Color32::from_rgb(45, 45, 48))
+                            .inner_margin(egui::Margin::same(4))
+                            .corner_radius(4.0)
+                            .show(ui, |ui| {
+                                if ui.button("Copy  (Ctrl+Shift+C)").clicked() {
+                                    ctx_copy = true;
+                                }
+                                if ui.button("Paste (Ctrl+Shift+V)").clicked() {
+                                    ctx_paste = true;
+                                }
+                            });
+                    });
+            }
         });
 
         self.new_branch_name = new_branch;
@@ -881,6 +953,14 @@ impl App {
             self.new_branch_name.clear();
         }
         if cancel_dialog { self.show_new_branch_dialog = false; }
+        if ctx_copy {
+            self.copy_selection();
+            self.show_context_menu = false;
+        }
+        if ctx_paste {
+            self.paste_clipboard();
+            self.show_context_menu = false;
+        }
         if let Some(action) = portal_result.and_then(|r| r.action) {
             match action {
                 PortalAction::ToggleCollapse => {
@@ -976,20 +1056,29 @@ impl ApplicationHandler<AppEvent> for App {
                 event: KeyEvent { state: ElementState::Pressed, ref logical_key, ref text, .. }, ..
             } => {
                 if let Some(terminal) = self.active_terminal() {
-                    // Check modifiers for Ctrl combos
                     let modifiers = self.egui_ctx.input(|i| i.modifiers);
                     let ctrl = modifiers.ctrl;
+                    let shift = modifiers.shift;
 
-                    if ctrl {
-                        // Ctrl+letter → send control character (0x01-0x1A)
+                    if ctrl && shift {
+                        // Ctrl+Shift combos: Copy/Paste
+                        if let Key::Character(ch) = logical_key {
+                            match ch.as_str() {
+                                "C" | "c" => self.copy_selection(),
+                                "V" | "v" => self.paste_clipboard(),
+                                _ => {}
+                            }
+                        }
+                    } else if ctrl {
+                        // Ctrl+letter → send control character
                         if let Key::Character(ch) = logical_key {
                             if let Some(c) = ch.chars().next() {
                                 let ctrl_byte = match c {
                                     'a'..='z' => Some(c as u8 - b'a' + 1),
                                     'A'..='Z' => Some(c as u8 - b'A' + 1),
-                                    '\\' => Some(0x1c), // Ctrl+\ = SIGQUIT
+                                    '\\' => Some(0x1c),
                                     ']' => Some(0x1d),
-                                    '[' => Some(0x1b), // ESC
+                                    '[' => Some(0x1b),
                                     _ => None,
                                 };
                                 if let Some(b) = ctrl_byte {
@@ -1017,6 +1106,48 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                 }
                 if let Some(gpu) = &self.gpu { gpu.window.request_redraw(); }
+            }
+            WindowEvent::MouseInput { state, button, .. } => {
+                use winit::event::MouseButton;
+                match (button, state) {
+                    (MouseButton::Left, ElementState::Pressed) => {
+                        // Start selection
+                        let pos = self.egui_ctx.input(|i| i.pointer.interact_pos()).unwrap_or_default();
+                        if let Some((col, line)) = self.pixel_to_cell(pos.x, pos.y) {
+                            if let Some(terminal) = self.active_terminal() {
+                                terminal.start_selection(col, line);
+                                self.mouse_selecting = true;
+                            }
+                        }
+                        self.show_context_menu = false;
+                    }
+                    (MouseButton::Left, ElementState::Released) => {
+                        self.mouse_selecting = false;
+                    }
+                    (MouseButton::Right, ElementState::Pressed) => {
+                        // Show context menu
+                        let pos = self.egui_ctx.input(|i| i.pointer.interact_pos()).unwrap_or_default();
+                        self.show_context_menu = true;
+                        self.context_menu_pos = pos;
+                    }
+                    _ => {}
+                }
+                if let Some(gpu) = &self.gpu { gpu.window.request_redraw(); }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                if self.mouse_selecting {
+                    let scale = self.gpu.as_ref()
+                        .map(|g| g.window.scale_factor() as f32)
+                        .unwrap_or(1.0);
+                    let x = position.x as f32 / scale;
+                    let y = position.y as f32 / scale;
+                    if let Some((col, line)) = self.pixel_to_cell(x, y) {
+                        if let Some(terminal) = self.active_terminal() {
+                            terminal.update_selection(col, line);
+                        }
+                    }
+                    if let Some(gpu) = &self.gpu { gpu.window.request_redraw(); }
+                }
             }
             _ => {}
         }
