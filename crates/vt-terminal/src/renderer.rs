@@ -183,7 +183,7 @@ impl TerminalRenderer {
         let mut live_rows: Vec<(i32, String, GlyphonColor)> = Vec::new();
         let is_scrolled = display_offset > 0;
         let live_line_count = if is_scrolled {
-            5_usize // Fixed 5 lines for live view (prompt + recent output)
+            20_usize
         } else {
             0
         };
