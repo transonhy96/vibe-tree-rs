@@ -189,11 +189,13 @@ impl TerminalRenderer {
         };
 
         if is_scrolled {
-            // Read the bottom N lines from grid at actual terminal position
-            // Grid lines: Line(-(screen_lines-1)) = top, Line(0) = bottom
-            // We want the last live_line_count lines: Line(-(live_line_count-1)) to Line(0)
+            // Read the bottom N lines from grid at ACTUAL terminal position.
+            // Grid indexing: Line(0) = top of visible area, Line(screen_lines-1) = bottom.
+            // The bottom line (prompt) is at Line(screen_lines-1).
+            // Read bottom live_line_count lines: Line(screen_lines-live_count) to Line(screen_lines-1)
+            let bottom = screen_lines as i32 - 1;
             for i in 0..live_line_count {
-                let line_idx = Line(-(live_line_count as i32 - 1 - i as i32));
+                let line_idx = Line(bottom - (live_line_count as i32 - 1 - i as i32));
                 let mut chars: Vec<(char, GlyphonColor)> = Vec::new();
                 for col_idx in 0..cols {
                     let point = Point::new(line_idx, Column(col_idx));
