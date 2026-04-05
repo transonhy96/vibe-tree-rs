@@ -9,20 +9,26 @@ pub enum WorktreeAction {
     Refresh,
 }
 
-/// Draw the worktree sidebar panel. Returns an action if the user clicked something.
+/// Result from drawing the worktree panel.
+pub struct WorktreePanelResult {
+    pub action: Option<WorktreeAction>,
+    pub panel_width: f32,
+}
+
+/// Draw the worktree sidebar panel. Returns action and actual panel width.
 pub fn draw_worktree_panel(
     ctx: &egui::Context,
     worktrees: &[Worktree],
     selected_idx: Option<usize>,
     project_name: &str,
-) -> Option<WorktreeAction> {
+) -> WorktreePanelResult {
     let mut action = None;
 
     let panel_frame = egui::Frame::new()
         .fill(Color32::from_rgb(37, 37, 38))
         .inner_margin(egui::Margin::same(8));
 
-    egui::SidePanel::left("worktree_panel")
+    let panel_response = egui::SidePanel::left("worktree_panel")
         .resizable(true)
         .default_width(200.0)
         .min_width(150.0)
@@ -119,5 +125,10 @@ pub fn draw_worktree_panel(
             }
         });
 
-    action
+    let panel_width = panel_response.response.rect.width();
+
+    WorktreePanelResult {
+        action,
+        panel_width,
+    }
 }

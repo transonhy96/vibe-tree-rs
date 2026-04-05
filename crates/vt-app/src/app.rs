@@ -6,7 +6,7 @@ use std::sync::Arc;
 use vt_core::config::AppConfig;
 use vt_core::types::Worktree;
 use vt_terminal::{TerminalInstance, TerminalRenderer};
-use vt_ui::{draw_worktree_panel, ThemeColors, WorktreeAction};
+use vt_ui::{draw_worktree_panel, ThemeColors, WorktreeAction, WorktreePanelResult};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
@@ -297,6 +297,7 @@ impl App {
         // Action flags
         let mut open_project = false;
         let mut wt_action: Option<WorktreeAction> = None;
+        let mut new_sidebar_width: Option<f32> = None;
         let mut create_branch = false;
         let mut cancel_dialog = false;
 
@@ -344,8 +345,9 @@ impl App {
 
             // Worktree sidebar
             if has_project {
-                wt_action =
-                    draw_worktree_panel(ctx, &worktrees, selected_idx, &project_name);
+                let result = draw_worktree_panel(ctx, &worktrees, selected_idx, &project_name);
+                wt_action = result.action;
+                new_sidebar_width = Some(result.panel_width);
             }
 
             // Central panel (transparent for terminal)
@@ -411,6 +413,11 @@ impl App {
             size_in_pixels: [gpu.config.width, gpu.config.height],
             pixels_per_point: full_output.pixels_per_point,
         };
+
+        // Update sidebar width from egui layout
+        if let Some(w) = new_sidebar_width {
+            self.sidebar_width = w;
+        }
 
         // 5. Prepare terminal text
         let active_term = self
