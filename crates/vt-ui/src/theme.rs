@@ -44,11 +44,11 @@ impl ThemeColors {
             Theme::Dark => Visuals::dark(),
             Theme::Light => Visuals::light(),
         };
-        // Make panel/window fills transparent so GPU-rendered terminal shows through.
-        // TopBottomPanel/SidePanel override with explicit opaque frames.
+        // Only CentralPanel needs to be transparent (terminal renders behind it).
+        // Keep window_fill opaque for menus/popups/dialogs.
         visuals.panel_fill = Color32::TRANSPARENT;
-        visuals.window_fill = Color32::TRANSPARENT;
-        visuals.extreme_bg_color = Color32::TRANSPARENT;
+        // Menus and popups need solid backgrounds
+        visuals.window_fill = Color32::from_rgb(45, 45, 48);
         ctx.set_visuals(visuals);
     }
 }

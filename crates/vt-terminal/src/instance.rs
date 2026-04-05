@@ -99,6 +99,31 @@ impl TerminalInstance {
         let _ = self.notifier.send(Msg::Input(Cow::Owned(data.to_vec())));
     }
 
+    /// Get visible terminal text as a string (for scanning/detection).
+    pub fn visible_text(&self) -> String {
+        use alacritty_terminal::grid::Dimensions;
+        let term = self.term.lock();
+        let content = term.renderable_content();
+        let mut lines: Vec<String> = Vec::new();
+        let mut current_line: i32 = i32::MIN;
+        let mut current_chars = String::new();
+
+        for indexed in content.display_iter {
+            let line = indexed.point.line.0;
+            if line != current_line {
+                if current_line != i32::MIN {
+                    lines.push(std::mem::take(&mut current_chars));
+                }
+                current_line = line;
+            }
+            current_chars.push(indexed.cell.c);
+        }
+        if !current_chars.is_empty() {
+            lines.push(current_chars);
+        }
+        lines.join("\n")
+    }
+
     /// Scroll the terminal display.
     pub fn scroll(&self, delta: i32) {
         self.term.lock().scroll_display(Scroll::Delta(delta));

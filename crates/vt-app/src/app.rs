@@ -6,7 +6,7 @@ use std::sync::Arc;
 use vt_core::config::AppConfig;
 use vt_core::types::Worktree;
 use vt_terminal::{TerminalInstance, TerminalRenderer};
-use vt_ui::{draw_worktree_panel, ThemeColors, WorktreeAction, WorktreePanelResult};
+use vt_ui::{draw_worktree_panel, draw_portal_panel, scan_output, DetectedItem, ThemeColors, WorktreeAction, WorktreePanelResult, PortalAction, PortalPanelResult};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
@@ -22,6 +22,9 @@ struct Workspace {
     has_remote_updates: bool,
     default_branch: Option<String>,
     sidebar_collapsed: bool,
+    portal_collapsed: bool,
+    detected_items: Vec<DetectedItem>,
+    last_scan_len: usize, // track how much output we've scanned
 }
 
 pub struct App {
@@ -45,6 +48,7 @@ pub struct App {
     open_project_path: String,
     open_project_error: Option<String>,
     sidebar_width: f32,
+    wants_quit: bool,
 }
 
 impl App {
@@ -73,6 +77,7 @@ impl App {
             open_project_path: String::new(),
             open_project_error: None,
             sidebar_width: 200.0,
+            wants_quit: false,
         }
     }
 
@@ -159,6 +164,9 @@ impl App {
             has_remote_updates: false,
             default_branch: Some(default_branch.clone()),
             sidebar_collapsed: false,
+            portal_collapsed: true, // start collapsed
+            detected_items: Vec::new(),
+            last_scan_len: 0,
         };
         self.workspaces.push(ws);
         let idx = self.workspaces.len() - 1;
@@ -402,6 +410,36 @@ impl App {
             }
         }
 
+        // Scan terminal output for detectable items
+        {
+            let active_path = self.active_ws()
+                .and_then(|ws| ws.selected_worktree_idx)
+                .and_then(|idx| self.active_ws().and_then(|ws| ws.worktrees.get(idx)))
+                .map(|wt| wt.path.clone());
+
+            if let Some(path) = active_path {
+                if let Some(ws) = self.active_ws_mut() {
+                    if let Some(term) = ws.terminals.get(&path) {
+                        let text = term.visible_text();
+                        if text.len() != ws.last_scan_len {
+                            ws.last_scan_len = text.len();
+                            let new_items = scan_output(&text);
+                            // Only add new unique items
+                            for item in new_items {
+                                if !ws.detected_items.iter().any(|d| d.value == item.value) {
+                                    ws.detected_items.push(item);
+                                }
+                            }
+                            // Keep last 50 items
+                            if ws.detected_items.len() > 50 {
+                                ws.detected_items.drain(0..ws.detected_items.len() - 50);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let gpu = match &self.gpu { Some(g) => g, None => return };
         let output = match gpu.surface.get_current_texture() {
             Ok(t) => t,
@@ -428,6 +466,10 @@ impl App {
         let has_terminal = self.active_terminal().is_some();
         let has_remote_updates = self.active_ws().map(|ws| ws.has_remote_updates).unwrap_or(false);
         let sidebar_collapsed = self.active_ws().map(|ws| ws.sidebar_collapsed).unwrap_or(false);
+        let portal_collapsed = self.active_ws().map(|ws| ws.portal_collapsed).unwrap_or(true);
+        let detected_items: Vec<DetectedItem> = self.active_ws()
+            .map(|ws| ws.detected_items.clone())
+            .unwrap_or_default();
         let show_new_branch = self.show_new_branch_dialog;
         let mut new_branch = self.new_branch_name.clone();
         let show_open_project = self.show_open_project_dialog;
@@ -438,7 +480,9 @@ impl App {
         let mut open_project = false;
         let mut confirm_open_project = false;
         let mut cancel_open_project = false;
+        let mut quit = false;
         let mut wt_result: Option<WorktreePanelResult> = None;
+        let mut portal_result: Option<PortalPanelResult> = None;
         let mut create_branch = false;
         let mut cancel_dialog = false;
         let mut switch_ws: Option<usize> = None;
@@ -448,7 +492,7 @@ impl App {
             let panel_frame = egui::Frame::new().fill(egui::Color32::from_rgb(30, 30, 30));
             let tab_frame = egui::Frame::new().fill(egui::Color32::from_rgb(24, 24, 24));
 
-            // Header bar (top-most)
+            // Menu + header bar (top-most)
             egui::TopBottomPanel::top("header")
                 .frame(panel_frame)
                 .show(ctx, |ui| {
@@ -457,13 +501,32 @@ impl App {
                             egui::RichText::new("VibeTreeRS")
                                 .color(egui::Color32::from_rgb(66, 133, 244)),
                         );
+                        ui.separator();
+                        egui::menu::bar(ui, |ui| {
+                            ui.menu_button("File", |ui| {
+                                if ui.button("Open Project...").clicked() {
+                                    open_project = true;
+                                    ui.close_menu();
+                                }
+                                ui.separator();
+                                if ui.button("Quit").clicked() {
+                                    quit = true;
+                                    ui.close_menu();
+                                }
+                            });
+                        });
                         if has_workspace {
                             ui.separator();
                             ui.label(&project_name);
                         }
                         if has_terminal {
-                            ui.separator();
-                            ui.label(format!("{}x{}", term_size.0, term_size.1));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.label(
+                                    egui::RichText::new(format!("{}x{}", term_size.0, term_size.1))
+                                        .size(11.0)
+                                        .color(egui::Color32::from_rgb(100, 100, 100)),
+                                );
+                            });
                         }
                     });
                 });
@@ -505,6 +568,11 @@ impl App {
             // Worktree sidebar (only when workspace is open)
             if has_workspace {
                 wt_result = Some(draw_worktree_panel(ctx, &worktrees, selected_wt_idx, &project_name, has_remote_updates, sidebar_collapsed));
+            }
+
+            // Portal panel (right side, only when workspace is open)
+            if has_workspace {
+                portal_result = Some(draw_portal_panel(ctx, &detected_items, portal_collapsed));
             }
 
             // Central panel
@@ -707,6 +775,9 @@ impl App {
         output.present();
 
         // Process deferred actions
+        if quit {
+            self.wants_quit = true;
+        }
         if open_project {
             if let Some(path) = rfd::FileDialog::new()
                 .set_title("Select a Git Project Folder")
@@ -744,6 +815,28 @@ impl App {
             self.new_branch_name.clear();
         }
         if cancel_dialog { self.show_new_branch_dialog = false; }
+        if let Some(action) = portal_result.and_then(|r| r.action) {
+            match action {
+                PortalAction::ToggleCollapse => {
+                    if let Some(ws) = self.active_ws_mut() {
+                        ws.portal_collapsed = !ws.portal_collapsed;
+                    }
+                }
+                PortalAction::OpenUrl(url) => {
+                    tracing::info!(url = %url, "Opening URL");
+                    let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+                }
+                PortalAction::OpenFile(path) => {
+                    tracing::info!(path = %path, "Opening file");
+                    let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
+                }
+                PortalAction::Close => {
+                    if let Some(ws) = self.active_ws_mut() {
+                        ws.portal_collapsed = true;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -788,7 +881,14 @@ impl ApplicationHandler<AppEvent> for App {
                 self.handle_resize(size.width, size.height);
                 if let Some(gpu) = &self.gpu { gpu.window.request_redraw(); }
             }
-            WindowEvent::RedrawRequested => { self.do_frame(); }
+            WindowEvent::RedrawRequested => {
+                self.do_frame();
+                if self.wants_quit {
+                    self.save_state();
+                    self.workspaces.clear();
+                    event_loop.exit();
+                }
+            }
             WindowEvent::KeyboardInput {
                 event: KeyEvent { state: ElementState::Pressed, ref logical_key, ref text, .. }, ..
             } => {
