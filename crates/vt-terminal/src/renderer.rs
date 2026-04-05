@@ -131,12 +131,19 @@ impl TerminalRenderer {
 
         drop(term);
 
-        // Build glyphon buffers per non-empty row
+        // Build glyphon buffers per non-empty row.
+        // Shift content up so the first non-empty line starts at offset_y
+        // (instead of placing content at absolute grid positions which puts
+        // the prompt at the bottom of a mostly-empty screen).
+        let first_line = row_data.first().map(|(l, _, _)| *l).unwrap_or(0);
+
         let mut buffers: Vec<GlyphonBuffer> = Vec::with_capacity(row_data.len());
         let mut positions: Vec<(f32, f32, GlyphonColor)> = Vec::with_capacity(row_data.len());
 
         for (line, text, color) in &row_data {
-            let y = offset_y + (*line as f32 + screen_lines as f32) * self.cell_height;
+            // Position relative to first content line, not absolute grid position
+            let row_index = (*line - first_line) as f32;
+            let y = offset_y + row_index * self.cell_height;
             let x = offset_x;
 
             let mut buf = GlyphonBuffer::new(&mut self.font_system, metrics);

@@ -364,11 +364,13 @@ impl ApplicationHandler<AppEvent> for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        // Let egui handle the event first
+        // Let egui see the event, but NEVER let it consume keyboard input —
+        // all keyboard input goes to the terminal.
+        let is_keyboard = matches!(event, WindowEvent::KeyboardInput { .. });
         if let Some(egui_state) = &mut self.egui_state {
             if let Some(gpu) = &self.gpu {
                 let response = egui_state.on_window_event(&gpu.window, &event);
-                if response.consumed {
+                if response.consumed && !is_keyboard {
                     if response.repaint {
                         gpu.window.request_redraw();
                     }
