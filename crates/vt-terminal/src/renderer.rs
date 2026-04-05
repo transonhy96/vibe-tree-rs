@@ -226,8 +226,9 @@ impl TerminalRenderer {
 
         drop(term);
 
-        // Only rebuild if content changed
-        if content_hash != self.last_content_hash {
+        // Rebuild when content changed, or always when scrolled (live section updates independently)
+        let needs_rebuild = content_hash != self.last_content_hash || is_scrolled;
+        if needs_rebuild {
             self.last_content_hash = content_hash;
 
             let available_height = screen_height as f32 - offset_y;
