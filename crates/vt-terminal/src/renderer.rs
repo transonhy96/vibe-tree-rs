@@ -183,7 +183,7 @@ impl TerminalRenderer {
         let mut live_rows: Vec<(i32, String, GlyphonColor)> = Vec::new();
         let is_scrolled = display_offset > 0;
         let live_line_count = if is_scrolled {
-            (screen_lines / 3).max(3) // Bottom 1/3 for live view
+            5_usize // Fixed 5 lines for live view (prompt + recent output)
         } else {
             0
         };
@@ -233,11 +233,10 @@ impl TerminalRenderer {
             let available_height = screen_height as f32 - offset_y;
 
             if is_scrolled {
-                // Split view using row-based math (not pixels).
-                // Total rows that fit on screen:
-                let total_rows = screen_lines;
-                // Reserve 1 row for divider, 1/3 for live, rest for scrollback
-                let actual_live = (total_rows / 3).max(2).min(live_line_count);
+                // Split view using row-based math.
+                // Use screen_lines - 1 to ensure last row fits within pixel bounds.
+                let total_rows = screen_lines.saturating_sub(1).max(8);
+                let actual_live = live_line_count.min(total_rows - 2); // at least 1 scrollback + 1 divider
                 let scrollback_rows = total_rows - actual_live - 1; // -1 for divider
                 let divider_row = scrollback_rows;
                 let live_start_row = scrollback_rows + 1;
@@ -314,9 +313,8 @@ impl TerminalRenderer {
             // Cursor
             let cx = offset_x + cursor_col as f32 * self.cell_width;
             let cy = if is_scrolled {
-                // Cursor in live section: use row-based position
-                let total_rows = screen_lines;
-                let actual_live = (total_rows / 3).max(2).min(live_line_count);
+                let total_rows = screen_lines.saturating_sub(1).max(8);
+                let actual_live = live_line_count.min(total_rows - 2);
                 let live_start_row = total_rows - actual_live;
                 let live_start = offset_y + live_start_row as f32 * self.cell_height;
                 // cursor_line: 0=bottom of terminal, -(n-1)=top
