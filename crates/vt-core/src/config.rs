@@ -15,7 +15,7 @@ impl Default for TerminalSettings {
     fn default() -> Self {
         Self {
             font_family: "monospace".into(),
-            font_size: 14.0,
+            font_size: 16.0,
             cursor_blink: true,
             scrollback: 10000,
             tab_stop_width: 4,

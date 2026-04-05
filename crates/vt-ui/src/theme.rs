@@ -39,10 +39,13 @@ impl ThemeColors {
     }
 
     pub fn apply_to_egui(&self, ctx: &egui::Context, theme: Theme) {
-        let visuals = match theme {
+        let mut visuals = match theme {
             Theme::Dark => Visuals::dark(),
             Theme::Light => Visuals::light(),
         };
+        // Only make panel_fill transparent — CentralPanel uses this.
+        // TopBottomPanel/SidePanel will override with explicit frames.
+        visuals.panel_fill = Color32::TRANSPARENT;
         ctx.set_visuals(visuals);
     }
 }

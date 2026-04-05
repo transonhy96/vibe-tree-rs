@@ -2,7 +2,6 @@ use crate::event::AppEvent;
 use crate::gpu::GpuContext;
 use std::sync::Arc;
 use vt_core::config::AppConfig;
-use vt_core::types::Theme;
 use vt_terminal::{TerminalInstance, TerminalRenderer};
 use vt_ui::ThemeColors;
 use winit::application::ApplicationHandler;
@@ -250,7 +249,7 @@ impl App {
 
         let bg = &self.theme_colors.terminal_bg;
         {
-            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
@@ -269,17 +268,19 @@ impl App {
                 ..Default::default()
             });
 
-            // Render terminal text
-            if let Some(renderer) = &self.terminal_renderer {
-                renderer.render_pass(&mut render_pass);
-            }
+            let mut render_pass = render_pass.forget_lifetime();
 
-            // Render egui on top
+            // Render egui first (menu/header panels with opaque frames)
             egui_renderer.render(
-                &mut render_pass.forget_lifetime(),
+                &mut render_pass,
                 &paint_jobs,
                 &screen_descriptor,
             );
+
+            // Render terminal text on top
+            if let Some(renderer) = &self.terminal_renderer {
+                renderer.render_pass(&mut render_pass);
+            }
         }
 
         for id in &full_output.textures_delta.free {
@@ -291,7 +292,10 @@ impl App {
     }
 
     fn draw_ui_static(ctx: &egui::Context, has_terminal: bool, term_size: (u16, u16)) {
-        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+        let panel_frame = egui::Frame::new().fill(egui::Color32::from_rgb(37, 37, 38));
+        egui::TopBottomPanel::top("menu_bar")
+            .frame(panel_frame)
+            .show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
                     if ui.button("Open Project...").clicked() {
@@ -310,9 +314,11 @@ impl App {
             });
         });
 
-        egui::TopBottomPanel::top("header").show(ctx, |ui| {
+        egui::TopBottomPanel::top("header")
+            .frame(panel_frame)
+            .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.heading("VibeTree");
+                ui.heading("VibeTreeRS");
                 ui.separator();
                 if has_terminal {
                     ui.label(format!("Terminal {}x{}", term_size.0, term_size.1));
@@ -322,9 +328,9 @@ impl App {
             });
         });
 
-        // Central panel is transparent — terminal renders behind it
+        // Central panel — transparent fill so GPU-rendered terminal text shows through
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE)
+            .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
             .show(ctx, |_ui| {});
     }
 }
@@ -336,7 +342,7 @@ impl ApplicationHandler<AppEvent> for App {
         }
 
         let attrs = WindowAttributes::default()
-            .with_title("VibeTree")
+            .with_title("VibeTreeRS")
             .with_inner_size(winit::dpi::LogicalSize::new(1200, 800));
 
         match event_loop.create_window(attrs) {

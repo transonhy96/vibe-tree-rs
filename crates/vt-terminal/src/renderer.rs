@@ -7,6 +7,7 @@ use glyphon::{
     Resolution, Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 use std::sync::Arc;
+use tracing;
 use wgpu;
 
 use crate::instance::EventProxy;
@@ -30,7 +31,7 @@ impl TerminalRenderer {
         surface_format: wgpu::TextureFormat,
         font_size: f32,
     ) -> Self {
-        let font_system = FontSystem::new();
+        let mut font_system = FontSystem::new();
         let swash_cache = SwashCache::new();
         let cache = Cache::new(device);
         let mut text_atlas = TextAtlas::new(device, queue, &cache, surface_format);
@@ -42,9 +43,25 @@ impl TerminalRenderer {
         );
         let viewport = Viewport::new(device, &cache);
 
-        // Approximate monospace cell dimensions
-        let cell_width = font_size * 0.6;
+        // Measure actual monospace cell dimensions
+        let metrics = Metrics::new(font_size, font_size * 1.2);
+        let mut measure_buf = GlyphonBuffer::new(&mut font_system, metrics);
+        measure_buf.set_text(
+            &mut font_system,
+            "MMMMMMMMMM",
+            Attrs::new().family(Family::Monospace),
+            Shaping::Basic,
+        );
+        measure_buf.shape_until_scroll(&mut font_system, false);
+
+        let cell_width = measure_buf
+            .layout_runs()
+            .next()
+            .and_then(|run| run.glyphs.first().map(|g| g.w))
+            .unwrap_or(font_size * 0.6);
         let cell_height = font_size * 1.2;
+
+        tracing::info!(cell_width, cell_height, font_size, "Font metrics measured");
 
         Self {
             font_system,
@@ -81,13 +98,11 @@ impl TerminalRenderer {
         let term = term.lock();
         let content = term.renderable_content();
         let screen_lines = term.screen_lines();
-        let cols = term.columns();
 
         let metrics = Metrics::new(self.font_size, self.cell_height);
 
-        // Build one text line per terminal row for efficient rendering.
-        // Collect row data: (line_index, chars_with_colors)
-        let mut row_data: Vec<(i32, Vec<(char, GlyphonColor)>)> = Vec::new();
+        // Collect rows from display_iter, skipping empty (whitespace-only) lines
+        let mut row_data: Vec<(i32, String, GlyphonColor)> = Vec::new();
         let mut current_line: i32 = i32::MIN;
         let mut current_chars: Vec<(char, GlyphonColor)> = Vec::new();
 
@@ -96,14 +111,13 @@ impl TerminalRenderer {
             let col = indexed.point.column.0;
 
             if line != current_line {
-                if current_line != i32::MIN && !current_chars.is_empty() {
-                    row_data.push((current_line, std::mem::take(&mut current_chars)));
+                if current_line != i32::MIN {
+                    Self::push_row(&mut row_data, current_line, &current_chars);
                 }
                 current_line = line;
                 current_chars.clear();
             }
 
-            // Pad with spaces if there are gaps
             while current_chars.len() < col {
                 current_chars.push((' ', GlyphonColor::rgba(0, 0, 0, 0)));
             }
@@ -111,65 +125,54 @@ impl TerminalRenderer {
             let fg = self.resolve_color(indexed.cell.fg);
             current_chars.push((indexed.cell.c, fg));
         }
-        if current_line != i32::MIN && !current_chars.is_empty() {
-            row_data.push((current_line, current_chars));
+        if current_line != i32::MIN {
+            Self::push_row(&mut row_data, current_line, &current_chars);
         }
 
         drop(term);
 
-        // Build glyphon buffers — one per row
+        // Build glyphon buffers per non-empty row
         let mut buffers: Vec<GlyphonBuffer> = Vec::with_capacity(row_data.len());
         let mut positions: Vec<(f32, f32, GlyphonColor)> = Vec::with_capacity(row_data.len());
 
-        for (line, chars) in &row_data {
+        for (line, text, color) in &row_data {
             let y = offset_y + (*line as f32 + screen_lines as f32) * self.cell_height;
             let x = offset_x;
 
-            // Build the line text and find the dominant color (use first non-space char's color)
-            let text: String = chars.iter().map(|(c, _)| c).collect();
-            let default_color = chars
-                .iter()
-                .find(|(c, _)| *c != ' ' && *c != '\0')
-                .map(|(_, color)| *color)
-                .unwrap_or(GlyphonColor::rgb(211, 215, 207));
-
             let mut buf = GlyphonBuffer::new(&mut self.font_system, metrics);
+            buf.set_size(&mut self.font_system, Some(screen_width as f32), None);
             buf.set_text(
                 &mut self.font_system,
-                &text,
-                Attrs::new().family(Family::Monospace).color(default_color),
+                text,
+                Attrs::new().family(Family::Monospace).color(*color),
                 Shaping::Basic,
             );
             buf.shape_until_scroll(&mut self.font_system, false);
 
-            positions.push((x, y, default_color));
+            positions.push((x, y, *color));
             buffers.push(buf);
         }
 
-        // Build text areas from buffers
         let text_areas: Vec<TextArea<'_>> = buffers
             .iter()
             .zip(positions.iter())
-            .map(|(buf, (x, y, color))| {
-                let width = cols as f32 * self.cell_width;
-                TextArea {
-                    buffer: buf,
-                    left: *x,
-                    top: *y,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: *x as i32,
-                        top: *y as i32,
-                        right: (*x + width) as i32,
-                        bottom: (*y + self.cell_height) as i32,
-                    },
-                    default_color: *color,
-                    custom_glyphs: &[],
-                }
+            .map(|(buf, (x, y, color))| TextArea {
+                buffer: buf,
+                left: *x,
+                top: *y,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: screen_width as i32,
+                    bottom: screen_height as i32,
+                },
+                default_color: *color,
+                custom_glyphs: &[],
             })
             .collect();
 
-        let _ = self.text_renderer.prepare(
+        let result = self.text_renderer.prepare(
             device,
             queue,
             &mut self.font_system,
@@ -178,6 +181,30 @@ impl TerminalRenderer {
             text_areas,
             &mut self.swash_cache,
         );
+        if let Err(e) = result {
+            tracing::error!("glyphon prepare failed: {:?}", e);
+        }
+    }
+
+    /// Push a row to row_data if it contains non-whitespace characters.
+    fn push_row(
+        row_data: &mut Vec<(i32, String, GlyphonColor)>,
+        line: i32,
+        chars: &[(char, GlyphonColor)],
+    ) {
+        let has_content = chars.iter().any(|(c, _)| !c.is_whitespace() && *c != '\0');
+        if !has_content {
+            return;
+        }
+
+        let text: String = chars.iter().map(|(c, _)| c).collect();
+        let color = chars
+            .iter()
+            .find(|(c, _)| !c.is_whitespace() && *c != '\0')
+            .map(|(_, color)| *color)
+            .unwrap_or(GlyphonColor::rgb(211, 215, 207));
+
+        row_data.push((line, text, color));
     }
 
     fn resolve_color(&self, color: TermColor) -> GlyphonColor {
@@ -189,7 +216,7 @@ impl TerminalRenderer {
     }
 
     /// Render the prepared text into the given render pass.
-    pub fn render_pass<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
+    pub fn render_pass(&self, render_pass: &mut wgpu::RenderPass<'static>) {
         let _ = self
             .text_renderer
             .render(&self.text_atlas, &self.viewport, render_pass);

@@ -11,7 +11,7 @@ fn main() -> Result<()> {
         .with_env_filter(EnvFilter::from_default_env().add_directive("vt=info".parse()?))
         .init();
 
-    tracing::info!("Starting VibeTree");
+    tracing::info!("Starting VibeTreeRS");
 
     let event_loop = EventLoop::<event::AppEvent>::with_user_event()
         .build()?;
