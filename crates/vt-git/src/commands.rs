@@ -87,11 +87,21 @@ pub async fn add_worktree(
         .join(&worktree_dir);
 
     let wt_str = worktree_path.to_string_lossy();
-    execute_git_command(
-        &["worktree", "add", "-b", branch_name, &wt_str],
+    // Try checking out existing branch first, fall back to creating new
+    let result = execute_git_command(
+        &["worktree", "add", &wt_str, branch_name],
         project_path,
     )
-    .await?;
+    .await;
+
+    if result.is_err() {
+        // Branch doesn't exist — create it
+        execute_git_command(
+            &["worktree", "add", "-b", branch_name, &wt_str],
+            project_path,
+        )
+        .await?;
+    }
 
     Ok(WorktreeAddResult {
         path: worktree_path,
@@ -132,4 +142,23 @@ pub async fn get_current_branch(worktree_path: &Path) -> Result<String, GitError
     let output =
         execute_git_command(&["rev-parse", "--abbrev-ref", "HEAD"], worktree_path).await?;
     Ok(output.trim().to_string())
+}
+
+/// Get the default branch name (main or master), if it exists.
+pub async fn get_default_branch(project_path: &Path) -> Option<String> {
+    // Check if 'main' exists
+    if execute_git_command(&["rev-parse", "--verify", "main"], project_path)
+        .await
+        .is_ok()
+    {
+        return Some("main".to_string());
+    }
+    // Check if 'master' exists
+    if execute_git_command(&["rev-parse", "--verify", "master"], project_path)
+        .await
+        .is_ok()
+    {
+        return Some("master".to_string());
+    }
+    None
 }

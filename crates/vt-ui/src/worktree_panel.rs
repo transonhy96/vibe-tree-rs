@@ -1,4 +1,4 @@
-use egui::{self, Color32, RichText, Vec2};
+use egui::{self, Color32, RichText};
 use vt_core::types::Worktree;
 
 /// Actions emitted by the worktree panel.
@@ -61,7 +61,8 @@ pub fn draw_worktree_panel(
                         .as_deref()
                         .unwrap_or("(detached)");
 
-                    let is_main = matches!(branch_name, "main" | "master");
+                    // First worktree is always the primary repo (main worktree)
+                    let is_main = i == 0 || matches!(branch_name, "main" | "master");
 
                     let bg = if is_selected {
                         Color32::from_rgb(55, 55, 60)
@@ -77,37 +78,19 @@ pub fn draw_worktree_panel(
                         Color32::from_rgb(200, 200, 200)
                     };
 
-                    let response = ui.allocate_ui_with_layout(
-                        Vec2::new(ui.available_width(), 28.0),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            let rect = ui.max_rect();
-                            ui.painter().rect_filled(rect, 4.0, bg);
-
-                            ui.add_space(8.0);
-
-                            let icon = if is_main { "*" } else { "-" };
-                            ui.label(RichText::new(icon).color(text_color).monospace());
-
-                            let resp = ui.selectable_label(
-                                false,
-                                RichText::new(branch_name).color(text_color),
-                            );
-
-                            if resp.clicked() {
-                                return Some(i);
-                            }
-                            None
-                        },
+                    let resp = ui.selectable_label(
+                        is_selected,
+                        RichText::new(format!("{} {}", if is_main { "*" } else { "-" }, branch_name))
+                            .color(text_color),
                     );
 
-                    if let Some(idx) = response.inner {
-                        action = Some(WorktreeAction::Select(idx));
+                    if resp.clicked() {
+                        action = Some(WorktreeAction::Select(i));
                     }
 
                     // Right-click context menu for non-main branches
                     if !is_main {
-                        response.response.context_menu(|ui| {
+                        resp.context_menu(|ui| {
                             if ui.button("Delete worktree").clicked() {
                                 action = Some(WorktreeAction::Delete(i));
                                 ui.close_menu();

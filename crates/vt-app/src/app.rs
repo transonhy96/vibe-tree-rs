@@ -13,8 +13,12 @@ use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowAttributes, WindowId};
 
-struct WorktreeTerminal {
-    terminal: TerminalInstance,
+struct Workspace {
+    path: PathBuf,
+    name: String,
+    worktrees: Vec<Worktree>,
+    selected_worktree_idx: Option<usize>,
+    terminals: HashMap<PathBuf, TerminalInstance>,
 }
 
 pub struct App {
@@ -29,16 +33,15 @@ pub struct App {
     theme_colors: ThemeColors,
     terminal_size: (u16, u16),
 
-    project_path: Option<PathBuf>,
-    project_name: String,
-    worktrees: Vec<Worktree>,
-    selected_worktree_idx: Option<usize>,
-    terminals: HashMap<PathBuf, WorktreeTerminal>,
+    workspaces: Vec<Workspace>,
+    active_workspace_idx: Option<usize>,
 
     show_new_branch_dialog: bool,
     new_branch_name: String,
+    show_open_project_dialog: bool,
+    open_project_path: String,
+    open_project_error: Option<String>,
     sidebar_width: f32,
-    sidebar_collapsed: bool,
 }
 
 impl App {
@@ -59,15 +62,14 @@ impl App {
             config,
             theme_colors,
             terminal_size: (80, 24),
-            project_path: None,
-            project_name: String::new(),
-            worktrees: Vec::new(),
-            selected_worktree_idx: None,
-            terminals: HashMap::new(),
+            workspaces: Vec::new(),
+            active_workspace_idx: None,
             show_new_branch_dialog: false,
             new_branch_name: String::new(),
+            show_open_project_dialog: false,
+            open_project_path: String::new(),
+            open_project_error: None,
             sidebar_width: 200.0,
-            sidebar_collapsed: false,
         }
     }
 
@@ -84,267 +86,339 @@ impl App {
                     None,
                 );
                 let egui_renderer = egui_wgpu::Renderer::new(
-                    &gpu.device,
-                    gpu.surface_format(),
-                    None,
-                    1,
-                    false,
+                    &gpu.device, gpu.surface_format(), None, 1, false,
                 );
                 let terminal_renderer = TerminalRenderer::new(
-                    &gpu.device,
-                    &gpu.queue,
-                    gpu.surface_format(),
+                    &gpu.device, &gpu.queue, gpu.surface_format(),
                     self.config.terminal.font_size,
                 );
-                self.theme_colors
-                    .apply_to_egui(&self.egui_ctx, self.config.theme);
+                self.theme_colors.apply_to_egui(&self.egui_ctx, self.config.theme);
                 self.egui_state = Some(egui_state);
                 self.egui_renderer = Some(egui_renderer);
                 self.terminal_renderer = Some(terminal_renderer);
                 self.gpu = Some(gpu);
-                tracing::info!("GPU initialized");
             }
             Err(e) => tracing::error!("GPU init failed: {}", e),
         }
     }
 
-    fn open_project(&mut self, path: PathBuf) {
-        let name = path
-            .file_name()
+    fn open_workspace(&mut self, path: PathBuf) {
+        // Don't open duplicate
+        if self.workspaces.iter().any(|w| w.path == path) {
+            self.active_workspace_idx = self.workspaces.iter().position(|w| w.path == path);
+            return;
+        }
+
+        let name = path.file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("project")
             .to_string();
-        tracing::info!(path = %path.display(), "Opening project");
-        let worktrees = self
-            .rt
-            .block_on(async { vt_git::list_worktrees(&path).await.unwrap_or_default() });
-        tracing::info!(count = worktrees.len(), "Loaded worktrees");
-        self.project_path = Some(path);
-        self.project_name = name;
-        self.worktrees = worktrees;
-        if !self.worktrees.is_empty() {
+
+        let mut worktrees = self.rt.block_on(async {
+            vt_git::list_worktrees(&path).await.unwrap_or_default()
+        });
+
+        // If main/master exists as a branch but not as a worktree, add it.
+        // Clicking it will create a real worktree.
+        let has_main = worktrees.iter().any(|w| {
+            w.branch.as_deref().map(|b| matches!(b, "main" | "master")).unwrap_or(false)
+        });
+        if !has_main {
+            if let Some(branch) = self.rt.block_on(vt_git::get_default_branch(&path)) {
+                let wt_dir = format!("{}-{}", name, branch);
+                let wt_path = path.parent().unwrap_or(&path).join(&wt_dir);
+                worktrees.push(Worktree {
+                    path: wt_path,
+                    branch: Some(branch),
+                    head: String::new(),
+                });
+            }
+        }
+
+        // Sort: main/master first, then alphabetical
+        worktrees.sort_by(|a, b| {
+            let a_main = a.branch.as_deref().map(|b| matches!(b, "main" | "master")).unwrap_or(false);
+            let b_main = b.branch.as_deref().map(|b| matches!(b, "main" | "master")).unwrap_or(false);
+            b_main.cmp(&a_main).then_with(|| a.branch.cmp(&b.branch))
+        });
+
+        tracing::info!(path = %path.display(), name = %name, worktrees = worktrees.len(), "Workspace opened");
+
+        let ws = Workspace {
+            path,
+            name,
+            worktrees,
+            selected_worktree_idx: None,
+            terminals: HashMap::new(),
+        };
+        self.workspaces.push(ws);
+        let idx = self.workspaces.len() - 1;
+        self.active_workspace_idx = Some(idx);
+
+        // Auto-select first worktree (main if sorted correctly)
+        if !self.workspaces[idx].worktrees.is_empty() {
             self.select_worktree(0);
         }
     }
 
+    fn close_workspace(&mut self, idx: usize) {
+        if idx >= self.workspaces.len() { return; }
+        self.workspaces[idx].terminals.clear();
+        self.workspaces.remove(idx);
+        if self.workspaces.is_empty() {
+            self.active_workspace_idx = None;
+        } else {
+            self.active_workspace_idx = Some(idx.min(self.workspaces.len() - 1));
+        }
+    }
+
+    fn active_ws(&self) -> Option<&Workspace> {
+        self.active_workspace_idx.and_then(|i| self.workspaces.get(i))
+    }
+
+    fn active_ws_mut(&mut self) -> Option<&mut Workspace> {
+        self.active_workspace_idx.and_then(|i| self.workspaces.get_mut(i))
+    }
+
     fn select_worktree(&mut self, idx: usize) {
-        if idx >= self.worktrees.len() {
+        let ws = match self.active_ws_mut() {
+            Some(ws) => ws,
+            None => return,
+        };
+        if idx >= ws.worktrees.len() { return; }
+
+        let wt_path = ws.worktrees[idx].path.clone();
+        let wt_branch = ws.worktrees[idx].branch.clone();
+
+        // If worktree dir doesn't exist, create it (virtual entry like main)
+        if !wt_path.exists() {
+            if let Some(branch_name) = &wt_branch {
+                let project_path = ws.path.clone();
+                tracing::info!(branch = %branch_name, "Creating worktree");
+                match self.rt.block_on(vt_git::add_worktree(&project_path, branch_name)) {
+                    Ok(res) => {
+                        tracing::info!(path = %res.path.display(), "Worktree created");
+                        self.refresh_worktrees();
+                        // Find and select the newly created worktree
+                        if let Some(ws) = self.active_ws() {
+                            if let Some(new_idx) = ws.worktrees.iter().position(|w| w.path == res.path) {
+                                self.select_worktree(new_idx); // recurse with real path
+                                return;
+                            }
+                        }
+                    }
+                    Err(e) => tracing::error!("Failed to create worktree: {}", e),
+                }
+            }
             return;
         }
-        self.selected_worktree_idx = Some(idx);
-        let wt_path = self.worktrees[idx].path.clone();
-        if !self.terminals.contains_key(&wt_path) {
-            self.spawn_terminal_for(&wt_path);
-        }
-    }
 
-    fn spawn_terminal_for(&mut self, worktree_path: &PathBuf) {
-        if let Some((cw, ch)) = self
-            .terminal_renderer
-            .as_ref()
-            .map(|r| (r.cell_width, r.cell_height))
-        {
-            if let Some(gpu) = &self.gpu {
-                self.terminal_size = self.calc_terminal_size(
-                    gpu.config.width as f32,
-                    gpu.config.height as f32,
-                    cw,
-                    ch,
-                );
+        let ws = self.active_ws_mut().unwrap();
+        ws.selected_worktree_idx = Some(idx);
+
+        if !ws.terminals.contains_key(&wt_path) {
+            let proxy = self.proxy.clone();
+            let wakeup = Arc::new(move || { let _ = proxy.send_event(AppEvent::Redraw); });
+
+            let cell_dims = self.terminal_renderer.as_ref()
+                .map(|r| (r.cell_width, r.cell_height));
+            if let Some((cw, ch)) = cell_dims {
+                if let Some(gpu) = &self.gpu {
+                    self.terminal_size = self.calc_terminal_size(
+                        gpu.config.width as f32, gpu.config.height as f32, cw, ch,
+                    );
+                }
             }
-        }
-        let proxy = self.proxy.clone();
-        let wakeup = Arc::new(move || {
-            let _ = proxy.send_event(AppEvent::Redraw);
-        });
-        let terminal = TerminalInstance::new(
-            self.terminal_size.0,
-            self.terminal_size.1,
-            worktree_path,
-            wakeup,
-        );
-        tracing::info!(path = %worktree_path.display(), "Terminal spawned");
-        self.terminals
-            .insert(worktree_path.clone(), WorktreeTerminal { terminal });
-    }
 
-    fn active_wt_path(&self) -> Option<PathBuf> {
-        self.selected_worktree_idx
-            .and_then(|idx| self.worktrees.get(idx))
-            .map(|wt| wt.path.clone())
+            let terminal = TerminalInstance::new(
+                self.terminal_size.0, self.terminal_size.1, &wt_path, wakeup,
+            );
+            tracing::info!(path = %wt_path.display(), "Terminal spawned");
+
+            // Re-borrow after creating terminal (can't hold ws across TerminalInstance::new)
+            let ws = self.active_ws_mut().unwrap();
+            ws.terminals.insert(wt_path, terminal);
+        }
     }
 
     fn refresh_worktrees(&mut self) {
-        if let Some(path) = self.project_path.clone() {
-            self.worktrees = self
-                .rt
-                .block_on(async { vt_git::list_worktrees(&path).await.unwrap_or_default() });
-        }
+        let ws = match self.active_ws_mut() {
+            Some(ws) => ws,
+            None => return,
+        };
+        let path = ws.path.clone();
+        let mut worktrees = self.rt.block_on(async {
+            vt_git::list_worktrees(&path).await.unwrap_or_default()
+        });
+        worktrees.sort_by(|a, b| {
+            let a_main = a.branch.as_deref().map(|b| matches!(b, "main" | "master")).unwrap_or(false);
+            let b_main = b.branch.as_deref().map(|b| matches!(b, "main" | "master")).unwrap_or(false);
+            b_main.cmp(&a_main).then_with(|| a.branch.cmp(&b.branch))
+        });
+        let ws = self.active_ws_mut().unwrap();
+        ws.worktrees = worktrees;
     }
 
     fn create_worktree(&mut self, branch_name: &str) {
-        let Some(path) = self.project_path.clone() else {
-            return;
+        let project_path = match self.active_ws() {
+            Some(ws) => ws.path.clone(),
+            None => return,
         };
-        match self
-            .rt
-            .block_on(vt_git::add_worktree(&path, branch_name))
-        {
+        match self.rt.block_on(vt_git::add_worktree(&project_path, branch_name)) {
             Ok(res) => {
                 tracing::info!(branch = %res.branch, "Worktree created");
                 self.refresh_worktrees();
-                if let Some(idx) = self.worktrees.iter().position(|w| w.path == res.path) {
-                    self.select_worktree(idx);
+                let new_path = res.path;
+                if let Some(ws) = self.active_ws() {
+                    if let Some(idx) = ws.worktrees.iter().position(|w| w.path == new_path) {
+                        self.select_worktree(idx);
+                    }
                 }
             }
             Err(e) => tracing::error!("Create worktree failed: {}", e),
         }
     }
 
-    fn setup_cursor_blink(&self) {
-        let proxy = self.proxy.clone();
-        self.rt.spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(530));
-            loop {
-                interval.tick().await;
-                if proxy.send_event(AppEvent::CursorBlink).is_err() {
-                    break;
-                }
-            }
-        });
+    fn active_terminal(&self) -> Option<&TerminalInstance> {
+        let ws = self.active_ws()?;
+        let idx = ws.selected_worktree_idx?;
+        let wt_path = &ws.worktrees.get(idx)?.path;
+        ws.terminals.get(wt_path)
     }
 
     fn calc_terminal_size(&self, w: f32, h: f32, cw: f32, ch: f32) -> (u16, u16) {
-        let header = 60.0_f32;
-        let sidebar = if self.project_path.is_some() && !self.sidebar_collapsed {
-            self.sidebar_width + 10.0
-        } else {
-            0.0
-        };
+        let header = 80.0_f32; // tabs + header
+        let sidebar = if self.active_ws().is_some() { self.sidebar_width + 10.0 } else { 0.0 };
         let cols = ((w - sidebar).max(cw) / cw).floor() as u16;
         let rows = ((h - header).max(ch) / ch).floor() as u16;
         (cols.max(2), rows.max(1))
     }
 
     fn handle_resize(&mut self, width: u32, height: u32) {
-        if let Some(gpu) = &mut self.gpu {
-            gpu.resize(width, height);
-        }
-        if let Some((cw, ch)) = self
-            .terminal_renderer
-            .as_ref()
-            .map(|r| (r.cell_width, r.cell_height))
-        {
+        if let Some(gpu) = &mut self.gpu { gpu.resize(width, height); }
+        if let Some((cw, ch)) = self.terminal_renderer.as_ref().map(|r| (r.cell_width, r.cell_height)) {
             let new_size = self.calc_terminal_size(width as f32, height as f32, cw, ch);
             if new_size != self.terminal_size {
                 self.terminal_size = new_size;
-                for wt in self.terminals.values_mut() {
-                    wt.terminal.resize(new_size.0, new_size.1);
+                for ws in &mut self.workspaces {
+                    for t in ws.terminals.values_mut() {
+                        t.resize(new_size.0, new_size.1);
+                    }
                 }
             }
         }
     }
 
     fn do_frame(&mut self) {
-        // 1. Process active terminal events
-        if let Some(path) = self.active_wt_path() {
-            if let Some(wt) = self.terminals.get_mut(&path) {
-                wt.terminal.process_events();
+        // Process active terminal events
+        if let Some(ws) = self.active_ws_mut() {
+            if let Some(idx) = ws.selected_worktree_idx {
+                if let Some(wt) = ws.worktrees.get(idx) {
+                    let path = wt.path.clone();
+                    if let Some(term) = ws.terminals.get_mut(&path) {
+                        term.process_events();
+                    }
+                }
             }
         }
 
-        // 2. Get GPU surface
-        let gpu = match &self.gpu {
-            Some(g) => g,
-            None => return,
-        };
+        let gpu = match &self.gpu { Some(g) => g, None => return };
         let output = match gpu.surface.get_current_texture() {
             Ok(t) => t,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
                 let size = gpu.window.inner_size();
-                if let Some(gpu) = &mut self.gpu {
-                    gpu.resize(size.width, size.height);
-                }
+                if let Some(gpu) = &mut self.gpu { gpu.resize(size.width, size.height); }
                 return;
             }
-            Err(e) => {
-                tracing::error!("Surface error: {}", e);
-                return;
-            }
+            Err(e) => { tracing::error!("Surface error: {}", e); return; }
         };
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // 3. Run egui ONCE — collect actions and rendering data
-        let raw_input = self
-            .egui_state
-            .as_mut()
-            .unwrap()
-            .take_egui_input(&gpu.window);
+        // Take egui input
+        let raw_input = self.egui_state.as_mut().unwrap().take_egui_input(&gpu.window);
 
-        // Snapshot state for the egui closure (avoids borrowing self)
-        let has_project = self.project_path.is_some();
-        let worktrees = self.worktrees.clone();
-        let selected_idx = self.selected_worktree_idx;
-        let project_name = self.project_name.clone();
+        // Snapshot state
+        let ws_names: Vec<String> = self.workspaces.iter().map(|w| w.name.clone()).collect();
+        let active_ws_idx = self.active_workspace_idx;
+        let has_workspace = active_ws_idx.is_some();
+        let worktrees = self.active_ws().map(|ws| ws.worktrees.clone()).unwrap_or_default();
+        let selected_wt_idx = self.active_ws().and_then(|ws| ws.selected_worktree_idx);
+        let project_name = self.active_ws().map(|ws| ws.name.clone()).unwrap_or_default();
         let term_size = self.terminal_size;
-        let has_terminal = self
-            .active_wt_path()
-            .map(|p| self.terminals.contains_key(&p))
-            .unwrap_or(false);
+        let has_terminal = self.active_terminal().is_some();
         let show_new_branch = self.show_new_branch_dialog;
         let mut new_branch = self.new_branch_name.clone();
+        let show_open_project = self.show_open_project_dialog;
+        let mut project_path_input = self.open_project_path.clone();
+        let open_project_err = self.open_project_error.clone();
 
-        // Action flags
+        // Actions
         let mut open_project = false;
-        let mut wt_action: Option<WorktreeAction> = None;
-        let mut new_sidebar_width: Option<f32> = None;
+        let mut confirm_open_project = false;
+        let mut cancel_open_project = false;
+        let mut wt_result: Option<WorktreePanelResult> = None;
         let mut create_branch = false;
         let mut cancel_dialog = false;
-        let mut sidebar_collapsed = self.sidebar_collapsed;
-        let mut toggle_sidebar = false;
+        let mut switch_ws: Option<usize> = None;
+        let mut close_ws: Option<usize> = None;
 
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
-            let panel_frame =
-                egui::Frame::new().fill(egui::Color32::from_rgb(37, 37, 38));
+            let panel_frame = egui::Frame::new().fill(egui::Color32::from_rgb(30, 30, 30));
+            let tab_frame = egui::Frame::new().fill(egui::Color32::from_rgb(24, 24, 24));
 
-            // Menu bar
-            egui::TopBottomPanel::top("menu_bar")
-                .frame(panel_frame)
+            // Workspace tab bar (top-most)
+            egui::TopBottomPanel::top("workspace_tabs")
+                .frame(tab_frame)
                 .show(ctx, |ui| {
-                    egui::menu::bar(ui, |ui| {
-                        ui.menu_button("File", |ui| {
-                            if ui.button("Open Project...").clicked() {
-                                open_project = true;
-                                ui.close_menu();
-                            }
+                    ui.horizontal(|ui| {
+                        for (i, name) in ws_names.iter().enumerate() {
+                            let is_active = active_ws_idx == Some(i);
+                            let bg = if is_active {
+                                egui::Color32::from_rgb(45, 45, 48)
+                            } else {
+                                egui::Color32::from_rgb(30, 30, 30)
+                            };
+                            let text_color = if is_active {
+                                egui::Color32::WHITE
+                            } else {
+                                egui::Color32::from_rgb(150, 150, 150)
+                            };
+
+                            let tab = ui.horizontal(|ui| {
+                                ui.painter().rect_filled(
+                                    ui.max_rect(), 0.0, bg,
+                                );
+                                let resp = ui.selectable_label(
+                                    is_active,
+                                    egui::RichText::new(name).color(text_color),
+                                );
+                                if resp.clicked() {
+                                    switch_ws = Some(i);
+                                }
+                                // Close button
+                                if ui.small_button("x").clicked() {
+                                    close_ws = Some(i);
+                                }
+                            });
                             ui.separator();
-                            if ui.button("Quit").clicked() {
-                                std::process::exit(0);
-                            }
-                        });
+                        }
+
+                        if ui.small_button("+").on_hover_text("Open project").clicked() {
+                            open_project = true;
+                        }
                     });
                 });
 
-            // Header
+            // Header bar
             egui::TopBottomPanel::top("header")
                 .frame(panel_frame)
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
-                        // Sidebar toggle
-                        if has_project {
-                            let icon = if sidebar_collapsed { ">>" } else { "<<" };
-                            if ui.small_button(icon).on_hover_text("Toggle sidebar").clicked() {
-                                toggle_sidebar = true;
-                            }
-                            ui.separator();
-                        }
                         ui.heading(
                             egui::RichText::new("VibeTreeRS")
                                 .color(egui::Color32::from_rgb(66, 133, 244)),
                         );
-                        if has_project {
+                        if has_workspace {
                             ui.separator();
                             ui.label(&project_name);
                         }
@@ -355,33 +429,71 @@ impl App {
                     });
                 });
 
-            // Worktree sidebar (only when not collapsed)
-            if has_project && !sidebar_collapsed {
-                let result = draw_worktree_panel(ctx, &worktrees, selected_idx, &project_name);
-                wt_action = result.action;
-                new_sidebar_width = Some(result.panel_width);
+            // Worktree sidebar (only when workspace is open)
+            if has_workspace {
+                wt_result = Some(draw_worktree_panel(ctx, &worktrees, selected_wt_idx, &project_name));
             }
 
-            // Central panel (transparent for terminal)
+            // Central panel
             egui::CentralPanel::default()
                 .frame(egui::Frame::NONE)
                 .show(ctx, |ui| {
-                    if !has_project {
+                    if !has_workspace {
+                        // Welcome screen
                         ui.vertical_centered(|ui| {
-                            ui.add_space(100.0);
+                            ui.add_space(150.0);
                             ui.heading(
                                 egui::RichText::new("VibeTreeRS")
-                                    .size(32.0)
+                                    .size(40.0)
                                     .color(egui::Color32::from_rgb(66, 133, 244)),
                             );
-                            ui.label("Vibe code with AI in parallel git worktrees");
-                            ui.add_space(20.0);
-                            if ui.button("Open Project Folder...").clicked() {
+                            ui.add_space(8.0);
+                            ui.label(
+                                egui::RichText::new("Vibe code with AI in parallel git worktrees")
+                                    .size(16.0)
+                                    .color(egui::Color32::from_rgb(150, 150, 150)),
+                            );
+                            ui.add_space(30.0);
+                            if ui.button(
+                                egui::RichText::new("  Open Project Folder  ").size(16.0)
+                            ).clicked() {
                                 open_project = true;
                             }
                         });
                     }
                 });
+
+            // Open project dialog
+            if show_open_project {
+                egui::Window::new("Open Project")
+                    .collapsible(false)
+                    .resizable(false)
+                    .min_width(400.0)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.label("Enter the path to a git repository:");
+                        ui.add_space(4.0);
+                        let resp = ui.text_edit_singleline(&mut project_path_input);
+                        if resp.lost_focus()
+                            && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                            && !project_path_input.is_empty()
+                        {
+                            confirm_open_project = true;
+                        }
+                        if let Some(err) = &open_project_err {
+                            ui.colored_label(egui::Color32::RED, err);
+                        }
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Open").clicked() && !project_path_input.is_empty() {
+                                confirm_open_project = true;
+                            }
+                            if ui.button("Cancel").clicked() {
+                                cancel_open_project = true;
+                            }
+                        });
+                    });
+            }
 
             // New branch dialog
             if show_new_branch {
@@ -411,69 +523,42 @@ impl App {
         });
 
         self.new_branch_name = new_branch;
+        self.open_project_path = project_path_input;
 
-        // 4. Handle egui platform output
-        self.egui_state
-            .as_mut()
-            .unwrap()
+        // Handle egui output
+        self.egui_state.as_mut().unwrap()
             .handle_platform_output(&gpu.window, full_output.platform_output);
-
-        let paint_jobs = self
-            .egui_ctx
-            .tessellate(full_output.shapes, full_output.pixels_per_point);
+        let paint_jobs = self.egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
         let screen_descriptor = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [gpu.config.width, gpu.config.height],
             pixels_per_point: full_output.pixels_per_point,
         };
 
-        // Update sidebar width from egui layout
-        if let Some(w) = new_sidebar_width {
-            self.sidebar_width = w;
+        // Update sidebar width from panel result
+        if let Some(ref result) = wt_result {
+            self.sidebar_width = result.panel_width;
         }
 
-        // 5. Prepare terminal text
-        let active_term = self
-            .active_wt_path()
-            .and_then(|p| self.terminals.get(&p))
-            .map(|wt| wt.terminal.term.clone());
-
+        // Prepare terminal text
+        let active_term = self.active_terminal().map(|t| t.term.clone());
         if let Some(term) = &active_term {
             if let Some(renderer) = &mut self.terminal_renderer {
-                let term_offset_x = if self.project_path.is_some() {
-                    self.sidebar_width + 10.0
-                } else {
-                    0.0
-                };
-                renderer.prepare(
-                    term,
-                    &gpu.device,
-                    &gpu.queue,
-                    gpu.config.width,
-                    gpu.config.height,
-                    term_offset_x,
-                    60.0,
-                );
+                let term_offset_x = if has_workspace { self.sidebar_width + 10.0 } else { 0.0 };
+                renderer.prepare(term, &gpu.device, &gpu.queue,
+                    gpu.config.width, gpu.config.height, term_offset_x, 80.0);
             }
         }
 
-        // 6. GPU render pass
+        // GPU render
         let egui_renderer = self.egui_renderer.as_mut().unwrap();
         for (id, delta) in &full_output.textures_delta.set {
             egui_renderer.update_texture(&gpu.device, &gpu.queue, *id, delta);
         }
-
-        let mut encoder = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("render_encoder"),
-            });
-
+        let mut encoder = gpu.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor { label: Some("render") },
+        );
         let _cmds = egui_renderer.update_buffers(
-            &gpu.device,
-            &gpu.queue,
-            &mut encoder,
-            &paint_jobs,
-            &screen_descriptor,
+            &gpu.device, &gpu.queue, &mut encoder, &paint_jobs, &screen_descriptor,
         );
 
         let bg = &self.theme_colors.terminal_bg;
@@ -481,15 +566,9 @@ impl App {
             let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
+                    view: &view, resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: bg[0],
-                            g: bg[1],
-                            b: bg[2],
-                            a: bg[3],
-                        }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: bg[0], g: bg[1], b: bg[2], a: bg[3] }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -503,24 +582,22 @@ impl App {
             }
         }
 
-        for id in &full_output.textures_delta.free {
-            egui_renderer.free_texture(id);
-        }
-
+        for id in &full_output.textures_delta.free { egui_renderer.free_texture(id); }
         gpu.queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
-        // 7. Process deferred actions AFTER rendering (no GPU borrows)
+        // Process deferred actions
         if open_project {
             if let Some(path) = rfd::FileDialog::new()
                 .set_title("Select a Git Project Folder")
                 .pick_folder()
             {
-                self.open_project(path);
+                self.open_workspace(path);
             }
         }
-        let wt_action_taken = wt_action.is_some();
-        if let Some(action) = wt_action {
+        if let Some(idx) = switch_ws { self.active_workspace_idx = Some(idx); }
+        if let Some(idx) = close_ws { self.close_workspace(idx); }
+        if let Some(action) = wt_result.and_then(|r| r.action) {
             match action {
                 WorktreeAction::Select(idx) => self.select_worktree(idx),
                 WorktreeAction::Refresh => self.refresh_worktrees(),
@@ -528,9 +605,7 @@ impl App {
                     self.show_new_branch_dialog = true;
                     self.new_branch_name.clear();
                 }
-                WorktreeAction::Delete(_idx) => {
-                    tracing::info!("Delete worktree requested");
-                }
+                WorktreeAction::Delete(_) => tracing::info!("Delete worktree requested"),
             }
         }
         if create_branch {
@@ -539,30 +614,13 @@ impl App {
             self.show_new_branch_dialog = false;
             self.new_branch_name.clear();
         }
-        if cancel_dialog {
-            self.show_new_branch_dialog = false;
-        }
-        if toggle_sidebar {
-            self.sidebar_collapsed = !self.sidebar_collapsed;
-            if self.sidebar_collapsed {
-                self.sidebar_width = 0.0;
-            }
-        }
-
-        // Immediately redraw after any UI action so changes appear without delay
-        if open_project || wt_action_taken || create_branch || cancel_dialog || toggle_sidebar {
-            if let Some(gpu) = &self.gpu {
-                gpu.window.request_redraw();
-            }
-        }
+        if cancel_dialog { self.show_new_branch_dialog = false; }
     }
 }
 
 impl ApplicationHandler<AppEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.gpu.is_some() {
-            return;
-        }
+        if self.gpu.is_some() { return; }
         let attrs = WindowAttributes::default()
             .with_title("VibeTreeRS")
             .with_inner_size(winit::dpi::LogicalSize::new(1200, 800));
@@ -570,32 +628,21 @@ impl ApplicationHandler<AppEvent> for App {
             Ok(window) => {
                 let window = Arc::new(window);
                 self.initialize_gpu(window);
-                self.setup_cursor_blink();
-                let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
-                self.open_project(cwd);
+                // Start with welcome screen — no workspace open
             }
             Err(e) => tracing::error!("Window creation failed: {}", e),
         }
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _window_id: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
         let is_keyboard = matches!(event, WindowEvent::KeyboardInput { .. });
-        let is_scroll = matches!(event, WindowEvent::MouseWheel { .. });
         if let Some(egui_state) = &mut self.egui_state {
             if let Some(gpu) = &self.gpu {
                 let response = egui_state.on_window_event(&gpu.window, &event);
-                let egui_needs_kb = self.show_new_branch_dialog;
-                // Always pass keyboard and scroll events to terminal
-                let force_passthrough = is_keyboard && !egui_needs_kb || is_scroll;
-                if response.consumed && !force_passthrough {
-                    if response.repaint {
-                        gpu.window.request_redraw();
-                    }
+                let egui_needs_kb = self.show_new_branch_dialog || self.show_open_project_dialog;
+                // Always redraw after any event so egui UI stays responsive
+                gpu.window.request_redraw();
+                if response.consumed && (!is_keyboard || egui_needs_kb) {
                     return;
                 }
             }
@@ -603,95 +650,36 @@ impl ApplicationHandler<AppEvent> for App {
 
         match event {
             WindowEvent::CloseRequested => {
-                self.terminals.clear();
+                self.workspaces.clear();
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
                 self.handle_resize(size.width, size.height);
-                if let Some(gpu) = &self.gpu {
-                    gpu.window.request_redraw();
-                }
+                if let Some(gpu) = &self.gpu { gpu.window.request_redraw(); }
             }
-            WindowEvent::RedrawRequested => {
-                self.do_frame();
-            }
+            WindowEvent::RedrawRequested => { self.do_frame(); }
             WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        state: ElementState::Pressed,
-                        ref logical_key,
-                        ref text,
-                        ..
-                    },
-                ..
+                event: KeyEvent { state: ElementState::Pressed, ref logical_key, ref text, .. }, ..
             } => {
-                // Mark cursor as active on first keypress
-                if let Some(renderer) = &mut self.terminal_renderer {
-                    renderer.mark_input();
-                }
-                if let Some(path) = self.active_wt_path() {
-                    if let Some(wt) = self.terminals.get(&path) {
-                        match logical_key {
-                            Key::Named(NamedKey::Enter) => wt.terminal.write(b"\r"),
-                            Key::Named(NamedKey::Backspace) => wt.terminal.write(b"\x7f"),
-                            Key::Named(NamedKey::Tab) => wt.terminal.write(b"\t"),
-                            Key::Named(NamedKey::Escape) => wt.terminal.write(b"\x1b"),
-                            Key::Named(NamedKey::ArrowUp) => wt.terminal.write(b"\x1b[A"),
-                            Key::Named(NamedKey::ArrowDown) => wt.terminal.write(b"\x1b[B"),
-                            Key::Named(NamedKey::ArrowRight) => wt.terminal.write(b"\x1b[C"),
-                            Key::Named(NamedKey::ArrowLeft) => wt.terminal.write(b"\x1b[D"),
-                            Key::Named(NamedKey::Home) => wt.terminal.write(b"\x1b[H"),
-                            Key::Named(NamedKey::End) => wt.terminal.write(b"\x1b[F"),
-                            Key::Named(NamedKey::PageUp) => wt.terminal.scroll(10),
-                            Key::Named(NamedKey::PageDown) => wt.terminal.scroll(-10),
-                            Key::Named(NamedKey::Delete) => wt.terminal.write(b"\x1b[3~"),
-                            _ => {
-                                if let Some(text) = text {
-                                    wt.terminal.write(text.as_bytes());
-                                }
-                            }
-                        }
+                if let Some(terminal) = self.active_terminal() {
+                    match logical_key {
+                        Key::Named(NamedKey::Enter) => terminal.write(b"\r"),
+                        Key::Named(NamedKey::Backspace) => terminal.write(b"\x7f"),
+                        Key::Named(NamedKey::Tab) => terminal.write(b"\t"),
+                        Key::Named(NamedKey::Escape) => terminal.write(b"\x1b"),
+                        Key::Named(NamedKey::ArrowUp) => terminal.write(b"\x1b[A"),
+                        Key::Named(NamedKey::ArrowDown) => terminal.write(b"\x1b[B"),
+                        Key::Named(NamedKey::ArrowRight) => terminal.write(b"\x1b[C"),
+                        Key::Named(NamedKey::ArrowLeft) => terminal.write(b"\x1b[D"),
+                        Key::Named(NamedKey::Home) => terminal.write(b"\x1b[H"),
+                        Key::Named(NamedKey::End) => terminal.write(b"\x1b[F"),
+                        Key::Named(NamedKey::PageUp) => terminal.write(b"\x1b[5~"),
+                        Key::Named(NamedKey::PageDown) => terminal.write(b"\x1b[6~"),
+                        Key::Named(NamedKey::Delete) => terminal.write(b"\x1b[3~"),
+                        _ => { if let Some(text) = text { terminal.write(text.as_bytes()); } }
                     }
                 }
-                if let Some(gpu) = &self.gpu {
-                    gpu.window.request_redraw();
-                }
-            }
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                ..
-            } => {
-                // Clicking the terminal area activates cursor
-                if let Some(renderer) = &mut self.terminal_renderer {
-                    renderer.mark_input();
-                }
-                if let Some(gpu) = &self.gpu {
-                    gpu.window.request_redraw();
-                }
-            }
-            WindowEvent::MouseWheel { delta, .. } => {
-                let lines = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => {
-                        // 3 terminal lines per scroll notch
-                        (y * 3.0) as i32
-                    }
-                    winit::event::MouseScrollDelta::PixelDelta(pos) => {
-                        let ch = self.terminal_renderer.as_ref()
-                            .map(|r| r.cell_height as f64)
-                            .unwrap_or(19.0);
-                        (pos.y / ch) as i32
-                    }
-                };
-                if lines != 0 {
-                    if let Some(path) = self.active_wt_path() {
-                        if let Some(wt) = self.terminals.get(&path) {
-                            wt.terminal.scroll(lines);
-                        }
-                    }
-                    if let Some(gpu) = &self.gpu {
-                        gpu.window.request_redraw();
-                    }
-                }
+                if let Some(gpu) = &self.gpu { gpu.window.request_redraw(); }
             }
             _ => {}
         }
@@ -699,20 +687,8 @@ impl ApplicationHandler<AppEvent> for App {
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
-            AppEvent::Redraw | AppEvent::PtyOutput { .. } => {
-                if let Some(gpu) = &self.gpu {
-                    gpu.window.request_redraw();
-                }
-            }
-            AppEvent::CursorBlink => {
-                // Only redraw if cursor blink is active (user has typed)
-                if let Some(renderer) = &mut self.terminal_renderer {
-                    if renderer.toggle_cursor_blink() {
-                        if let Some(gpu) = &self.gpu {
-                            gpu.window.request_redraw();
-                        }
-                    }
-                }
+            AppEvent::Redraw | AppEvent::PtyOutput { .. } | AppEvent::CursorBlink => {
+                if let Some(gpu) = &self.gpu { gpu.window.request_redraw(); }
             }
             AppEvent::PtyExited { session_id, code } => {
                 tracing::info!(session_id, code, "PTY exited");
