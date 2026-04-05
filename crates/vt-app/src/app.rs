@@ -38,6 +38,7 @@ pub struct App {
     show_new_branch_dialog: bool,
     new_branch_name: String,
     sidebar_width: f32,
+    sidebar_collapsed: bool,
 }
 
 impl App {
@@ -66,6 +67,7 @@ impl App {
             show_new_branch_dialog: false,
             new_branch_name: String::new(),
             sidebar_width: 200.0,
+            sidebar_collapsed: false,
         }
     }
 
@@ -214,7 +216,7 @@ impl App {
 
     fn calc_terminal_size(&self, w: f32, h: f32, cw: f32, ch: f32) -> (u16, u16) {
         let header = 60.0_f32;
-        let sidebar = if self.project_path.is_some() {
+        let sidebar = if self.project_path.is_some() && !self.sidebar_collapsed {
             self.sidebar_width + 10.0
         } else {
             0.0
@@ -300,6 +302,8 @@ impl App {
         let mut new_sidebar_width: Option<f32> = None;
         let mut create_branch = false;
         let mut cancel_dialog = false;
+        let mut sidebar_collapsed = self.sidebar_collapsed;
+        let mut toggle_sidebar = false;
 
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
             let panel_frame =
@@ -328,6 +332,14 @@ impl App {
                 .frame(panel_frame)
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
+                        // Sidebar toggle
+                        if has_project {
+                            let icon = if sidebar_collapsed { ">>" } else { "<<" };
+                            if ui.small_button(icon).on_hover_text("Toggle sidebar").clicked() {
+                                toggle_sidebar = true;
+                            }
+                            ui.separator();
+                        }
                         ui.heading(
                             egui::RichText::new("VibeTreeRS")
                                 .color(egui::Color32::from_rgb(66, 133, 244)),
@@ -343,8 +355,8 @@ impl App {
                     });
                 });
 
-            // Worktree sidebar
-            if has_project {
+            // Worktree sidebar (only when not collapsed)
+            if has_project && !sidebar_collapsed {
                 let result = draw_worktree_panel(ctx, &worktrees, selected_idx, &project_name);
                 wt_action = result.action;
                 new_sidebar_width = Some(result.panel_width);
@@ -528,6 +540,12 @@ impl App {
         }
         if cancel_dialog {
             self.show_new_branch_dialog = false;
+        }
+        if toggle_sidebar {
+            self.sidebar_collapsed = !self.sidebar_collapsed;
+            if self.sidebar_collapsed {
+                self.sidebar_width = 0.0;
+            }
         }
     }
 }
