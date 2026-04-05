@@ -37,6 +37,8 @@ pub struct TerminalRenderer {
     cursor_blink_visible: bool,
     /// Whether the terminal has received user input (cursor starts blinking).
     cursor_active: bool,
+    /// Last time user typed — cursor stays solid during typing.
+    last_input_time: std::time::Instant,
     /// Cached cursor glyph buffer.
     cursor_buffer: Option<GlyphonBuffer>,
 }
@@ -93,18 +95,30 @@ impl TerminalRenderer {
             cursor_pos: None,
             cursor_blink_visible: true,
             cursor_active: false,
+            last_input_time: std::time::Instant::now(),
             cursor_buffer: None,
         }
     }
 
-    /// Call when user types — activates cursor blinking.
+    /// Call when user types — resets blink debounce, keeps cursor solid.
     pub fn mark_input(&mut self) {
         self.cursor_active = true;
+        self.cursor_blink_visible = true;
+        self.last_input_time = std::time::Instant::now();
     }
 
     /// Toggle cursor blink state. Returns true if a redraw is needed.
+    /// Only blinks if 500ms have passed since last input (debounce).
     pub fn toggle_cursor_blink(&mut self) -> bool {
         if !self.cursor_active {
+            return false;
+        }
+        // Stay solid while user is actively typing
+        if self.last_input_time.elapsed() < std::time::Duration::from_millis(500) {
+            if !self.cursor_blink_visible {
+                self.cursor_blink_visible = true;
+                return true;
+            }
             return false;
         }
         self.cursor_blink_visible = !self.cursor_blink_visible;
