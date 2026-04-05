@@ -29,10 +29,16 @@ pub struct TerminalRenderer {
     pub cell_width: f32,
     pub cell_height: f32,
     font_size: f32,
-    /// Cached shaped lines — only rebuilt when content changes.
     cached_lines: Vec<CachedLine>,
-    /// Hash of last rendered content to detect changes.
     last_content_hash: u64,
+    /// Cursor position in pixels (x, y), set during prepare().
+    cursor_pos: Option<(f32, f32)>,
+    /// Cursor blink state.
+    cursor_blink_visible: bool,
+    /// Whether the terminal has received user input (cursor starts blinking).
+    cursor_active: bool,
+    /// Cached cursor glyph buffer.
+    cursor_buffer: Option<GlyphonBuffer>,
 }
 
 impl TerminalRenderer {
@@ -84,7 +90,25 @@ impl TerminalRenderer {
             font_size,
             cached_lines: Vec::new(),
             last_content_hash: 0,
+            cursor_pos: None,
+            cursor_blink_visible: true,
+            cursor_active: false,
+            cursor_buffer: None,
         }
+    }
+
+    /// Call when user types — activates cursor blinking.
+    pub fn mark_input(&mut self) {
+        self.cursor_active = true;
+    }
+
+    /// Toggle cursor blink state. Returns true if a redraw is needed.
+    pub fn toggle_cursor_blink(&mut self) -> bool {
+        if !self.cursor_active {
+            return false;
+        }
+        self.cursor_blink_visible = !self.cursor_blink_visible;
+        true
     }
 
     pub fn prepare(
@@ -147,12 +171,18 @@ impl TerminalRenderer {
             Self::push_row(&mut row_data, current_line, &current_chars);
         }
 
-        // Also hash cursor position
+        // Hash cursor position + blink state
         let cursor = content.cursor;
+        let blink_bit = if self.cursor_active && !self.cursor_blink_visible { 1u64 } else { 0 };
         content_hash = content_hash
             .wrapping_mul(31)
             .wrapping_add(cursor.point.line.0 as u64 * 13)
-            .wrapping_add(cursor.point.column.0 as u64 * 17);
+            .wrapping_add(cursor.point.column.0 as u64 * 17)
+            .wrapping_add(blink_bit);
+
+        // Store cursor grid position for later pixel calculation in rebuild_lines
+        let cursor_line = cursor.point.line.0;
+        let cursor_col = cursor.point.column.0;
 
         drop(term);
 
@@ -160,10 +190,43 @@ impl TerminalRenderer {
         if content_hash != self.last_content_hash {
             self.last_content_hash = content_hash;
             self.rebuild_lines(&row_data, screen_lines, display_offset, screen_width, screen_height, offset_x, offset_y);
+
+            // Compute cursor pixel position using same y_base logic
+            let first_line = row_data.first().map(|(l, _, _)| *l).unwrap_or(0);
+            let last_line = row_data.last().map(|(l, _, _)| *l).unwrap_or(0);
+            let content_rows = (last_line - first_line + 1) as usize;
+            let screen_full = content_rows >= screen_lines;
+            let y_base = if display_offset == 0 && !screen_full {
+                offset_y - first_line as f32 * self.cell_height
+            } else {
+                offset_y + screen_lines as f32 * self.cell_height
+            };
+
+            let cx = offset_x + cursor_col as f32 * self.cell_width;
+            let cy = y_base + cursor_line as f32 * self.cell_height;
+            self.cursor_pos = Some((cx, cy));
+
+            // Build cursor block character
+            let show_cursor = !self.cursor_active || self.cursor_blink_visible;
+            if show_cursor {
+                let metrics = Metrics::new(self.font_size, self.cell_height);
+                let mut buf = GlyphonBuffer::new(&mut self.font_system, metrics);
+                buf.set_size(&mut self.font_system, Some(self.cell_width * 2.0), None);
+                buf.set_text(
+                    &mut self.font_system,
+                    "\u{2588}", // Full block character
+                    Attrs::new().family(Family::Monospace).color(GlyphonColor::rgba(200, 200, 200, 180)),
+                    Shaping::Basic,
+                );
+                buf.shape_until_scroll(&mut self.font_system, false);
+                self.cursor_buffer = Some(buf);
+            } else {
+                self.cursor_buffer = None;
+            }
         }
 
-        // Prepare text areas from cache
-        let text_areas: Vec<TextArea<'_>> = self
+        // Prepare text areas from cache + cursor
+        let mut text_areas: Vec<TextArea<'_>> = self
             .cached_lines
             .iter()
             .map(|cl| TextArea {
@@ -181,6 +244,24 @@ impl TerminalRenderer {
                 custom_glyphs: &[],
             })
             .collect();
+
+        // Add cursor
+        if let (Some((cx, cy)), Some(cursor_buf)) = (self.cursor_pos, &self.cursor_buffer) {
+            text_areas.push(TextArea {
+                buffer: cursor_buf,
+                left: cx,
+                top: cy,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: screen_width as i32,
+                    bottom: screen_height as i32,
+                },
+                default_color: GlyphonColor::rgba(200, 200, 200, 180),
+                custom_glyphs: &[],
+            });
+        }
 
         let _ = self.text_renderer.prepare(
             device,

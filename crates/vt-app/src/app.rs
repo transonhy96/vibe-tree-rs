@@ -199,7 +199,18 @@ impl App {
         }
     }
 
-    // No cursor blink timer — static cursor for performance
+    fn setup_cursor_blink(&self) {
+        let proxy = self.proxy.clone();
+        self.rt.spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(530));
+            loop {
+                interval.tick().await;
+                if proxy.send_event(AppEvent::CursorBlink).is_err() {
+                    break;
+                }
+            }
+        });
+    }
 
     fn calc_terminal_size(&self, w: f32, h: f32, cw: f32, ch: f32) -> (u16, u16) {
         let header = 60.0_f32;
@@ -526,7 +537,7 @@ impl ApplicationHandler<AppEvent> for App {
             Ok(window) => {
                 let window = Arc::new(window);
                 self.initialize_gpu(window);
-                // No cursor blink — static cursor
+                self.setup_cursor_blink();
                 let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
                 self.open_project(cwd);
             }
@@ -579,6 +590,10 @@ impl ApplicationHandler<AppEvent> for App {
                     },
                 ..
             } => {
+                // Mark cursor as active on first keypress
+                if let Some(renderer) = &mut self.terminal_renderer {
+                    renderer.mark_input();
+                }
                 if let Some(path) = self.active_wt_path() {
                     if let Some(wt) = self.terminals.get(&path) {
                         match logical_key {
@@ -637,9 +652,19 @@ impl ApplicationHandler<AppEvent> for App {
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
-            AppEvent::Redraw | AppEvent::PtyOutput { .. } | AppEvent::CursorBlink => {
+            AppEvent::Redraw | AppEvent::PtyOutput { .. } => {
                 if let Some(gpu) = &self.gpu {
                     gpu.window.request_redraw();
+                }
+            }
+            AppEvent::CursorBlink => {
+                // Only redraw if cursor blink is active (user has typed)
+                if let Some(renderer) = &mut self.terminal_renderer {
+                    if renderer.toggle_cursor_blink() {
+                        if let Some(gpu) = &self.gpu {
+                            gpu.window.request_redraw();
+                        }
+                    }
                 }
             }
             AppEvent::PtyExited { session_id, code } => {
