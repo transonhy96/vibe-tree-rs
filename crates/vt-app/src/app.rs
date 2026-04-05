@@ -607,6 +607,26 @@ impl ApplicationHandler<AppEvent> for App {
                     gpu.window.request_redraw();
                 }
             }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let lines = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => y as i32,
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => {
+                        (pos.y / self.terminal_renderer.as_ref()
+                            .map(|r| r.cell_height as f64)
+                            .unwrap_or(19.0)) as i32
+                    }
+                };
+                if lines != 0 {
+                    if let Some(path) = self.active_wt_path() {
+                        if let Some(wt) = self.terminals.get(&path) {
+                            wt.terminal.scroll(lines);
+                        }
+                    }
+                    if let Some(gpu) = &self.gpu {
+                        gpu.window.request_redraw();
+                    }
+                }
+            }
             _ => {}
         }
     }

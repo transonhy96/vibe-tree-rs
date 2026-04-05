@@ -1,5 +1,6 @@
 use alacritty_terminal::event::{Event as TermEvent, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop as PtyEventLoop, EventLoopSender, Msg};
+use alacritty_terminal::grid::Scroll;
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{self, Term};
@@ -96,6 +97,11 @@ impl TerminalInstance {
     /// Send input bytes to the PTY.
     pub fn write(&self, data: &[u8]) {
         let _ = self.notifier.send(Msg::Input(Cow::Owned(data.to_vec())));
+    }
+
+    /// Scroll the terminal display.
+    pub fn scroll(&self, delta: i32) {
+        self.term.lock().scroll_display(Scroll::Delta(delta));
     }
 
     /// Resize the terminal.
