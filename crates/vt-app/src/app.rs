@@ -576,6 +576,15 @@ impl App {
         let project_name = self.active_ws().map(|ws| ws.name.clone()).unwrap_or_default();
         let term_size = self.terminal_size;
         let has_terminal = self.active_terminal().is_some();
+        if !has_terminal && has_workspace {
+            // Debug: why is terminal not found?
+            if let Some(ws) = self.active_ws() {
+                let idx = ws.selected_worktree_idx;
+                let wt_path = idx.and_then(|i| ws.worktrees.get(i)).map(|w| w.path.clone());
+                let term_keys: Vec<_> = ws.terminals.keys().collect();
+                tracing::warn!(?idx, ?wt_path, ?term_keys, "Terminal not found!");
+            }
+        }
         let has_remote_updates = self.active_ws().map(|ws| ws.has_remote_updates).unwrap_or(false);
         let sidebar_collapsed = self.active_ws().map(|ws| ws.sidebar_collapsed).unwrap_or(false);
         let portal_collapsed = self.active_ws().map(|ws| ws.portal_collapsed).unwrap_or(true);
@@ -699,7 +708,7 @@ impl App {
 
             // Central panel
             egui::CentralPanel::default()
-                .frame(egui::Frame::NONE)
+                .frame(egui::Frame::new().fill(egui::Color32::TRANSPARENT))
                 .show(ctx, |ui| {
                     if !has_workspace {
                         // Welcome screen
@@ -725,8 +734,8 @@ impl App {
                         });
                     } else if has_terminal {
                         // Terminal area — capture mouse for selection/scroll/context menu
-                        let rect = ui.available_rect_before_wrap();
-                        let resp = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+                        let rect = ui.max_rect();
+                        let resp = ui.interact(rect, egui::Id::new("terminal_area"), egui::Sense::click_and_drag());
 
                         // Scroll
                         let scroll_delta = ui.input(|i| i.raw_scroll_delta.y);
@@ -739,9 +748,11 @@ impl App {
                             (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.latest_pos())
                         });
                         let (just_pressed, is_down, pointer_pos) = pointer;
+                        let hovered = resp.hovered();
+                        let btn_down = resp.is_pointer_button_down_on();
 
                         if let Some(pos) = pointer_pos {
-                            if resp.hovered() || resp.is_pointer_button_down_on() {
+                            if hovered || btn_down {
                                 if just_pressed {
                                     terminal_mouse_down = Some(pos);
                                 } else if is_down {
@@ -1012,6 +1023,12 @@ impl App {
                 }
             }
         }
+        // Force re-render if selection is active (selection changes don't change content hash)
+        if terminal_mouse_down.is_some() || terminal_mouse_drag.is_some() {
+            if let Some(renderer) = &mut self.terminal_renderer {
+                renderer.last_content_hash = 0; // force rebuild
+            }
+        }
         if terminal_clear {
             if let Some(terminal) = self.active_terminal() {
                 terminal.write(b"\x0c"); // Ctrl+L clear
@@ -1082,9 +1099,11 @@ impl ApplicationHandler<AppEvent> for App {
             if let Some(gpu) = &self.gpu {
                 let response = egui_state.on_window_event(&gpu.window, &event);
                 let egui_needs_kb = self.show_new_branch_dialog || self.show_open_project_dialog;
-                // Always redraw after any event so egui UI stays responsive
-                gpu.window.request_redraw();
-                if response.consumed && (!is_keyboard || egui_needs_kb) {
+                if response.repaint {
+                    gpu.window.request_redraw();
+                }
+                // Block keyboard for dialogs. Never block mouse — egui handles it in do_frame.
+                if is_keyboard && egui_needs_kb && response.consumed {
                     return;
                 }
             }

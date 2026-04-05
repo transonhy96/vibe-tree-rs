@@ -30,7 +30,7 @@ pub struct TerminalRenderer {
     pub cell_height: f32,
     font_size: f32,
     cached_lines: Vec<CachedLine>,
-    last_content_hash: u64,
+    pub last_content_hash: u64,
     cursor_pos: Option<(f32, f32)>,
     cursor_blink_visible: bool,
     cursor_active: bool,
