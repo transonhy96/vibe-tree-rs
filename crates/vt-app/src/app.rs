@@ -53,6 +53,7 @@ pub struct App {
     sidebar_width: f32,
     wants_quit: bool,
     mouse_selecting: bool,
+    last_mouse_cell: Option<(usize, i32)>,
     show_context_menu: bool,
     context_menu_pos: egui::Pos2,
     clipboard: Option<arboard::Clipboard>,
@@ -86,6 +87,7 @@ impl App {
             sidebar_width: 200.0,
             wants_quit: false,
             mouse_selecting: false,
+            last_mouse_cell: None,
             show_context_menu: false,
             context_menu_pos: egui::Pos2::ZERO,
             clipboard: arboard::Clipboard::new().ok(),
@@ -733,53 +735,7 @@ impl App {
                             }
                         });
                     } else if has_terminal {
-                        // Terminal area — capture mouse for selection/scroll/context menu
-                        let rect = ui.max_rect();
-                        let resp = ui.interact(rect, egui::Id::new("terminal_area"), egui::Sense::click_and_drag());
-
-                        // Scroll
-                        let scroll_delta = ui.input(|i| i.raw_scroll_delta.y);
-                        if scroll_delta != 0.0 {
-                            terminal_scroll = (scroll_delta / 3.0) as i32;
-                        }
-
-                        // Selection: track primary button press/drag
-                        let pointer = ui.input(|i| {
-                            (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.latest_pos())
-                        });
-                        let (just_pressed, is_down, pointer_pos) = pointer;
-                        let hovered = resp.hovered();
-                        let btn_down = resp.is_pointer_button_down_on();
-
-                        if let Some(pos) = pointer_pos {
-                            if hovered || btn_down {
-                                if just_pressed {
-                                    terminal_mouse_down = Some(pos);
-                                } else if is_down {
-                                    terminal_mouse_drag = Some(pos);
-                                }
-                            }
-                        }
-                        if resp.drag_stopped() {
-                            terminal_mouse_up = true;
-                        }
-
-                        // Right-click context menu
-                        resp.context_menu(|ui| {
-                            if ui.button("Copy  (Ctrl+Shift+C)").clicked() {
-                                ctx_copy = true;
-                                ui.close_menu();
-                            }
-                            if ui.button("Paste (Ctrl+Shift+V)").clicked() {
-                                ctx_paste = true;
-                                ui.close_menu();
-                            }
-                            ui.separator();
-                            if ui.button("Clear terminal").clicked() {
-                                terminal_clear = true;
-                                ui.close_menu();
-                            }
-                        });
+                        // Terminal area is transparent — mouse handled via winit events
                     }
                 });
 
@@ -1094,6 +1050,58 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
+        // Handle mouse events for terminal BEFORE egui gets them
+        match &event {
+            WindowEvent::MouseInput { state, button, .. } => {
+                use winit::event::MouseButton;
+                if *button == MouseButton::Left {
+                    if *state == ElementState::Pressed {
+                        self.mouse_selecting = true;
+                        // Get cursor position from last known
+                        if let Some((col, line)) = self.last_mouse_cell {
+                            if let Some(terminal) = self.active_terminal() {
+                                terminal.start_selection(col, line);
+                            }
+                        }
+                    } else {
+                        self.mouse_selecting = false;
+                    }
+                    if let Some(gpu) = &self.gpu { gpu.window.request_redraw(); }
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                let scale = self.gpu.as_ref().map(|g| g.window.scale_factor()).unwrap_or(1.0) as f32;
+                let x = position.x as f32 / scale;
+                let y = position.y as f32 / scale;
+                self.last_mouse_cell = self.pixel_to_cell(x, y);
+                if self.mouse_selecting {
+                    if let Some((col, line)) = self.last_mouse_cell {
+                        if let Some(terminal) = self.active_terminal() {
+                            terminal.update_selection(col, line);
+                        }
+                    }
+                    // Force re-render for selection highlight
+                    if let Some(renderer) = &mut self.terminal_renderer {
+                        renderer.last_content_hash = 0;
+                    }
+                    if let Some(gpu) = &self.gpu { gpu.window.request_redraw(); }
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let lines = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => *y as i32,
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => (pos.y / 20.0) as i32,
+                };
+                if lines != 0 {
+                    if let Some(terminal) = self.active_terminal() {
+                        terminal.scroll(lines);
+                    }
+                    if let Some(gpu) = &self.gpu { gpu.window.request_redraw(); }
+                }
+            }
+            _ => {}
+        }
+
         let is_keyboard = matches!(event, WindowEvent::KeyboardInput { .. });
         if let Some(egui_state) = &mut self.egui_state {
             if let Some(gpu) = &self.gpu {
@@ -1102,7 +1110,6 @@ impl ApplicationHandler<AppEvent> for App {
                 if response.repaint {
                     gpu.window.request_redraw();
                 }
-                // Block keyboard for dialogs. Never block mouse — egui handles it in do_frame.
                 if is_keyboard && egui_needs_kb && response.consumed {
                     return;
                 }
