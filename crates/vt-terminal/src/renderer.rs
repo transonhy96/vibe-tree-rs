@@ -323,11 +323,10 @@ impl TerminalRenderer {
                 live_start + row_in_live * self.cell_height
             } else {
                 // Normal positioning
-                let first_line = row_data.first().map(|(l, _, _)| *l).unwrap_or(0);
-                let last_line = row_data.last().map(|(l, _, _)| *l).unwrap_or(0);
-                let content_rows = (last_line - first_line + 1) as usize;
-                let y_base = if content_rows < screen_lines {
-                    offset_y - first_line as f32 * self.cell_height
+                let screen_full = row_data.len() >= screen_lines;
+                let y_base = if !screen_full {
+                    // Cursor at end of content rows
+                    offset_y + row_data.len() as f32 * self.cell_height
                 } else {
                     offset_y + (screen_lines - 1) as f32 * self.cell_height
                 };
@@ -434,25 +433,35 @@ impl TerminalRenderer {
     ) {
         let metrics = Metrics::new(self.font_size, self.cell_height);
 
-        let first_line = row_data.first().map(|(l, _, _)| *l).unwrap_or(0);
-        let last_line = row_data.last().map(|(l, _, _)| *l).unwrap_or(0);
-        let content_rows = (last_line - first_line + 1) as usize;
-        let screen_full = content_rows >= screen_lines;
+        // Use actual row count (after empty-line filtering), not line index span.
+        // This prevents 2 visible lines at Line(-48) and Line(0) from being
+        // treated as "full screen" just because the indices span 49 lines.
+        let screen_full = row_data.len() >= screen_lines;
 
         let y_base = if !screen_full {
-            offset_y - first_line as f32 * self.cell_height
+            // Not enough content to fill screen — place lines starting from top.
+            // Each row positioned at offset_y + (index within row_data) * cell_height.
+            // We handle this inline below.
+            0.0 // unused, see below
         } else {
+            // Full screen — absolute positioning
             offset_y + (screen_lines - 1) as f32 * self.cell_height
         };
 
         self.cached_lines.clear();
 
-        for (line, text, color) in row_data {
-            let y = y_base + *line as f32 * self.cell_height;
-            // Skip lines outside the allowed region
-            if y < offset_y - self.cell_height || y > offset_y + max_rows as f32 * self.cell_height {
-                continue;
-            }
+        for (i, (line, text, color)) in row_data.iter().enumerate() {
+            let y = if screen_full {
+                let computed = y_base + *line as f32 * self.cell_height;
+                // Skip lines outside the allowed region
+                if computed < offset_y - self.cell_height || computed > offset_y + max_rows as f32 * self.cell_height {
+                    continue;
+                }
+                computed
+            } else {
+                // Place lines sequentially from the top
+                offset_y + i as f32 * self.cell_height
+            };
 
             let mut buf = GlyphonBuffer::new(&mut self.font_system, metrics);
             buf.set_size(&mut self.font_system, Some(screen_width as f32), None);

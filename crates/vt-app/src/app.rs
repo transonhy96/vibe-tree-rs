@@ -634,8 +634,8 @@ impl ApplicationHandler<AppEvent> for App {
                             Key::Named(NamedKey::ArrowLeft) => wt.terminal.write(b"\x1b[D"),
                             Key::Named(NamedKey::Home) => wt.terminal.write(b"\x1b[H"),
                             Key::Named(NamedKey::End) => wt.terminal.write(b"\x1b[F"),
-                            Key::Named(NamedKey::PageUp) => wt.terminal.write(b"\x1b[5~"),
-                            Key::Named(NamedKey::PageDown) => wt.terminal.write(b"\x1b[6~"),
+                            Key::Named(NamedKey::PageUp) => wt.terminal.scroll(10),
+                            Key::Named(NamedKey::PageDown) => wt.terminal.scroll(-10),
                             Key::Named(NamedKey::Delete) => wt.terminal.write(b"\x1b[3~"),
                             _ => {
                                 if let Some(text) = text {
