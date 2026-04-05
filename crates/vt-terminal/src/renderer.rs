@@ -454,8 +454,8 @@ impl TerminalRenderer {
         for (_i, (line, text, color)) in row_data.iter().enumerate() {
             let row = (*line + screen_lines as i32 - 1) as f32;
             let y = offset_y + row * self.cell_height + y_shift;
-            // Skip lines outside visible area
-            if y < offset_y - self.cell_height || y > offset_y + max_rows as f32 * self.cell_height {
+            // Skip lines outside visible area (line must fit entirely)
+            if y < offset_y || y + self.cell_height > offset_y + max_rows as f32 * self.cell_height {
                 continue;
             }
             // Skip empty lines (no visible glyphs to shape)
