@@ -391,14 +391,19 @@ impl App {
         ws.terminals.get(wt_path)
     }
 
+    /// Gap between sidebar and terminal content (1 cell width).
+    fn terminal_left_offset(&self) -> f32 {
+        if self.active_ws().is_none() { return 0.0; }
+        let gap = self.terminal_renderer.as_ref().map(|r| r.cell_width).unwrap_or(10.0);
+        self.sidebar_width + gap
+    }
+
     /// Convert pixel position to terminal grid coordinates.
-    /// Returns (column, line) where Line(0) = top of visible area.
-    /// Clamps to valid range — never returns None for positions near edges.
     fn pixel_to_cell(&self, x: f32, y: f32) -> Option<(usize, i32)> {
         let renderer = self.terminal_renderer.as_ref()?;
         let header = 80.0;
-        let sidebar = if self.active_ws().is_some() { self.sidebar_width } else { 0.0 };
-        let term_x = (x - sidebar).max(0.0);
+        let left = self.terminal_left_offset();
+        let term_x = (x - left).max(0.0);
         let term_y = (y - header).max(0.0);
         let col = (term_x / renderer.cell_width) as usize;
         let line = (term_y / renderer.cell_height) as i32;
@@ -484,8 +489,8 @@ impl App {
 
     fn calc_terminal_size(&self, w: f32, h: f32, cw: f32, ch: f32) -> (u16, u16) {
         let header = 80.0_f32; // tabs + header
-        let sidebar = if self.active_ws().is_some() { self.sidebar_width } else { 0.0 };
-        let cols = ((w - sidebar).max(cw) / cw).floor() as u16;
+        let left = self.terminal_left_offset();
+        let cols = ((w - left).max(cw) / cw).floor() as u16;
         let rows = ((h - header).max(ch) / ch).floor() as u16;
         (cols.max(2), rows.max(1))
     }
@@ -602,7 +607,7 @@ impl App {
                 if let Some(sel) = term.selection.as_ref().and_then(|s| s.to_range(&*term)) {
                     if let Some(renderer) = &self.terminal_renderer {
                         let header = 80.0_f32;
-                        let sidebar = if has_workspace { self.sidebar_width } else { 0.0 };
+                        let sidebar = self.terminal_left_offset();
                         let cw = renderer.cell_width;
                         let ch = renderer.cell_height;
                         let cols = self.terminal_size.0 as usize;
@@ -935,8 +940,8 @@ impl App {
         // Prepare terminal text
         let active_term = self.active_terminal().map(|t| t.term.clone());
         if let Some(term) = &active_term {
+            let term_offset_x = self.terminal_left_offset();
             if let Some(renderer) = &mut self.terminal_renderer {
-                let term_offset_x = if has_workspace { self.sidebar_width } else { 0.0 };
                 renderer.prepare(term, &gpu.device, &gpu.queue,
                     gpu.config.width, gpu.config.height, term_offset_x, 80.0);
             }
