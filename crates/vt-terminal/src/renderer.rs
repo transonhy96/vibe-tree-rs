@@ -233,12 +233,15 @@ impl TerminalRenderer {
             let available_height = screen_height as f32 - offset_y;
 
             if is_scrolled {
-                // Split view: pin live section to bottom, divider above it, scrollback fills the rest
-                let live_height = live_line_count as f32 * self.cell_height;
+                // Split view: pin live section to bottom, divider above it, scrollback fills the rest.
+                // Ensure live section + divider don't exceed available space.
                 let divider_height = self.cell_height;
+                let max_live = ((available_height - divider_height) / self.cell_height / 3.0).floor().max(2.0) as usize;
+                let actual_live = live_line_count.min(max_live);
+                let live_height = actual_live as f32 * self.cell_height;
 
                 // Calculate from bottom up
-                let live_start_y = screen_height as f32 - live_height;
+                let live_start_y = offset_y + available_height - live_height;
                 let divider_y = live_start_y - divider_height;
                 let scrollback_rows = ((divider_y - offset_y) / self.cell_height).floor().max(1.0) as usize;
 
@@ -277,7 +280,7 @@ impl TerminalRenderer {
 
                 // Build live lines (bottom section, pinned to screen bottom)
                 let live_metrics = Metrics::new(self.font_size, self.cell_height);
-                for (i, (_, text, color)) in live_rows.iter().enumerate() {
+                for (i, (_, text, color)) in live_rows.iter().take(actual_live).enumerate() {
                     let y = live_start_y + i as f32 * self.cell_height;
                     let mut buf = GlyphonBuffer::new(&mut self.font_system, live_metrics);
                     buf.set_size(&mut self.font_system, Some(screen_width as f32), None);
@@ -309,15 +312,16 @@ impl TerminalRenderer {
             }
 
             // Cursor
-            let y_base = offset_y + screen_lines as f32 * self.cell_height;
             let cx = offset_x + cursor_col as f32 * self.cell_width;
             let cy = if is_scrolled {
                 // Cursor in live section pinned to bottom
-                let live_start_y_val = screen_height as f32 - live_line_count as f32 * self.cell_height;
-                // cursor_line: 0=bottom, -(n-1)=top of visible area
-                // Map into live section rows
-                let row_in_live = (cursor_line + live_line_count as i32 - 1).max(0) as f32;
-                live_start_y_val + row_in_live * self.cell_height
+                let live_h = live_line_count.min(
+                    ((available_height - self.cell_height) / self.cell_height / 3.0).floor().max(2.0) as usize
+                );
+                let live_start = offset_y + available_height - live_h as f32 * self.cell_height;
+                // cursor_line: 0=bottom, -(n-1)=top
+                let row_in_live = (cursor_line + live_h as i32 - 1).max(0) as f32;
+                live_start + row_in_live * self.cell_height
             } else {
                 // Normal positioning
                 let first_line = row_data.first().map(|(l, _, _)| *l).unwrap_or(0);
