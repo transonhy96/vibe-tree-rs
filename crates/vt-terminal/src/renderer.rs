@@ -233,17 +233,17 @@ impl TerminalRenderer {
             let available_height = screen_height as f32 - offset_y;
 
             if is_scrolled {
-                // Split view: pin live section to bottom, divider above it, scrollback fills the rest.
-                // Ensure live section + divider don't exceed available space.
-                let divider_height = self.cell_height;
-                let max_live = ((available_height - divider_height) / self.cell_height / 3.0).floor().max(2.0) as usize;
-                let actual_live = live_line_count.min(max_live);
-                let live_height = actual_live as f32 * self.cell_height;
+                // Split view using row-based math (not pixels).
+                // Total rows that fit on screen:
+                let total_rows = screen_lines;
+                // Reserve 1 row for divider, 1/3 for live, rest for scrollback
+                let actual_live = (total_rows / 3).max(2).min(live_line_count);
+                let scrollback_rows = total_rows - actual_live - 1; // -1 for divider
+                let divider_row = scrollback_rows;
+                let live_start_row = scrollback_rows + 1;
 
-                // Calculate from bottom up
-                let live_start_y = offset_y + available_height - live_height;
-                let divider_y = live_start_y - divider_height;
-                let scrollback_rows = ((divider_y - offset_y) / self.cell_height).floor().max(1.0) as usize;
+                let divider_y = offset_y + divider_row as f32 * self.cell_height;
+                let live_start_y = offset_y + live_start_row as f32 * self.cell_height;
 
                 // Rebuild scrollback lines (top section)
                 self.rebuild_lines_absolute(
@@ -314,13 +314,14 @@ impl TerminalRenderer {
             // Cursor
             let cx = offset_x + cursor_col as f32 * self.cell_width;
             let cy = if is_scrolled {
-                // Cursor in live section pinned to bottom
-                let live_h = live_line_count.min(
-                    ((available_height - self.cell_height) / self.cell_height / 3.0).floor().max(2.0) as usize
-                );
-                let live_start = offset_y + available_height - live_h as f32 * self.cell_height;
-                // cursor_line: 0=bottom, -(n-1)=top
-                let row_in_live = (cursor_line + live_h as i32 - 1).max(0) as f32;
+                // Cursor in live section: use row-based position
+                let total_rows = screen_lines;
+                let actual_live = (total_rows / 3).max(2).min(live_line_count);
+                let live_start_row = total_rows - actual_live;
+                let live_start = offset_y + live_start_row as f32 * self.cell_height;
+                // cursor_line: 0=bottom of terminal, -(n-1)=top
+                // Map into live section: line 0 → last live row
+                let row_in_live = (cursor_line + actual_live as i32 - 1).max(0) as f32;
                 live_start + row_in_live * self.cell_height
             } else {
                 // Normal positioning
