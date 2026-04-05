@@ -519,6 +519,7 @@ impl App {
                 self.open_project(path);
             }
         }
+        let wt_action_taken = wt_action.is_some();
         if let Some(action) = wt_action {
             match action {
                 WorktreeAction::Select(idx) => self.select_worktree(idx),
@@ -545,6 +546,13 @@ impl App {
             self.sidebar_collapsed = !self.sidebar_collapsed;
             if self.sidebar_collapsed {
                 self.sidebar_width = 0.0;
+            }
+        }
+
+        // Immediately redraw after any UI action so changes appear without delay
+        if open_project || wt_action_taken || create_branch || cancel_dialog || toggle_sidebar {
+            if let Some(gpu) = &self.gpu {
+                gpu.window.request_redraw();
             }
         }
     }
