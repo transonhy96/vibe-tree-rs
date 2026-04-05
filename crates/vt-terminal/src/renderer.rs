@@ -131,16 +131,28 @@ impl TerminalRenderer {
 
         drop(term);
 
-        // Build glyphon buffers per non-empty row.
-        // Use absolute grid positions: line -(screen_lines-1) = top, line 0 = bottom
+        // Position content so last line is at the bottom of visible area,
+        // but if content is shorter than screen, start from the top.
+        let last_line = row_data.last().map(|(l, _, _)| *l).unwrap_or(0);
+        let first_line = row_data.first().map(|(l, _, _)| *l).unwrap_or(0);
+        let content_lines = (last_line - first_line + 1) as f32;
+        let available_rows = ((screen_height as f32 - offset_y) / self.cell_height).floor();
+
+        // If content fits on screen, place first line at top.
+        // If content fills or exceeds screen, use absolute grid positions.
+        let y_base = if content_lines < available_rows {
+            // Content shorter than screen — start from top
+            offset_y - first_line as f32 * self.cell_height
+        } else {
+            // Full screen — use absolute positions
+            offset_y + screen_lines as f32 * self.cell_height
+        };
+
         let mut buffers: Vec<GlyphonBuffer> = Vec::with_capacity(row_data.len());
         let mut positions: Vec<(f32, f32, GlyphonColor)> = Vec::with_capacity(row_data.len());
 
         for (line, text, color) in &row_data {
-            // Map line index to y position:
-            // line -(screen_lines-1) → offset_y (top)
-            // line 0 → offset_y + (screen_lines-1) * cell_height (bottom)
-            let y = offset_y + (*line as f32 + screen_lines as f32) * self.cell_height;
+            let y = y_base + *line as f32 * self.cell_height;
             let x = offset_x;
 
             let mut buf = GlyphonBuffer::new(&mut self.font_system, metrics);

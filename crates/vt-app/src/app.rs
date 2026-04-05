@@ -555,8 +555,9 @@ impl ApplicationHandler<AppEvent> for App {
         if let Some(egui_state) = &mut self.egui_state {
             if let Some(gpu) = &self.gpu {
                 let response = egui_state.on_window_event(&gpu.window, &event);
-                let egui_wants_kb = self.egui_ctx.wants_keyboard_input();
-                if response.consumed && (!is_keyboard || egui_wants_kb) {
+                // Only let egui consume keyboard when a dialog/text field is active
+                let egui_needs_kb = self.show_new_branch_dialog;
+                if response.consumed && (!is_keyboard || egui_needs_kb) {
                     if response.repaint {
                         gpu.window.request_redraw();
                     }
