@@ -44,10 +44,8 @@ impl ThemeColors {
             Theme::Dark => Visuals::dark(),
             Theme::Light => Visuals::light(),
         };
-        // Only CentralPanel needs to be transparent (terminal renders behind it).
-        // Keep window_fill opaque for menus/popups/dialogs.
-        visuals.panel_fill = Color32::TRANSPARENT;
-        // Menus and popups need solid backgrounds
+        // Keep everything opaque — CentralPanel overrides with Frame::NONE
+        visuals.panel_fill = Color32::from_rgb(37, 37, 38);
         visuals.window_fill = Color32::from_rgb(45, 45, 48);
         ctx.set_visuals(visuals);
     }

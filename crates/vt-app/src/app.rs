@@ -930,10 +930,12 @@ impl App {
                 ..Default::default()
             });
             let mut render_pass = render_pass.forget_lifetime();
-            egui_renderer.render(&mut render_pass, &paint_jobs, &screen_descriptor);
+            // Terminal text first (on cleared background)
             if let Some(renderer) = &self.terminal_renderer {
                 renderer.render_pass(&mut render_pass);
             }
+            // egui on top (panels, menus, popups all render over terminal)
+            egui_renderer.render(&mut render_pass, &paint_jobs, &screen_descriptor);
         }
 
         for id in &full_output.textures_delta.free { egui_renderer.free_texture(id); }

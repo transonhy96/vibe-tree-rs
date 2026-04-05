@@ -142,12 +142,23 @@ impl TerminalRenderer {
         let screen_lines = term.screen_lines();
         let cols = term.columns();
         let display_offset = term.grid().display_offset();
+        let selection = content.selection.clone();
 
         // Build content hash and row data from display_iter (scrollback view)
         let mut content_hash: u64 = 0;
         let mut row_data: Vec<(i32, String, GlyphonColor)> = Vec::new();
         let mut current_line: i32 = i32::MIN;
         let mut current_chars: Vec<(char, GlyphonColor)> = Vec::new();
+
+        // Hash selection state
+        if let Some(ref sel) = selection {
+            content_hash = content_hash
+                .wrapping_mul(31)
+                .wrapping_add(sel.start.line.0 as u64 * 101)
+                .wrapping_add(sel.start.column.0 as u64 * 103)
+                .wrapping_add(sel.end.line.0 as u64 * 107)
+                .wrapping_add(sel.end.column.0 as u64 * 109);
+        }
 
         for indexed in content.display_iter {
             let line = indexed.point.line.0;
@@ -162,7 +173,7 @@ impl TerminalRenderer {
 
             if line != current_line {
                 if current_line != i32::MIN {
-                    Self::push_row(&mut row_data, current_line, &current_chars);
+                    Self::push_row(&mut row_data, current_line, &current_chars, &selection);
                 }
                 current_line = line;
                 current_chars.clear();
@@ -176,7 +187,7 @@ impl TerminalRenderer {
             current_chars.push((c, fg));
         }
         if current_line != i32::MIN {
-            Self::push_row(&mut row_data, current_line, &current_chars);
+            Self::push_row(&mut row_data, current_line, &current_chars, &selection);
         }
 
         // If scrolled, also read the live bottom lines directly from grid
@@ -203,7 +214,7 @@ impl TerminalRenderer {
                     let fg = resolve_color(cell.fg);
                     chars.push((cell.c, fg));
                 }
-                Self::push_row(&mut live_rows, i as i32, &chars);
+                Self::push_row(&mut live_rows, i as i32, &chars, &None);
             }
 
             // Hash live rows too
@@ -497,15 +508,29 @@ impl TerminalRenderer {
         row_data: &mut Vec<(i32, String, GlyphonColor)>,
         line: i32,
         chars: &[(char, GlyphonColor)],
+        selection: &Option<alacritty_terminal::selection::SelectionRange>,
     ) {
-        // Always push the row — don't filter empty lines.
-        // Empty lines produce no visible glyphs but maintain correct positioning.
+        use alacritty_terminal::index::{Column, Line, Point};
+
         let text: String = chars.iter().map(|(c, _)| c).collect();
-        let color = chars
-            .iter()
-            .find(|(c, _)| !c.is_whitespace() && *c != '\0')
-            .map(|(_, color)| *color)
-            .unwrap_or(GlyphonColor::rgb(211, 215, 207));
+
+        // Check if any character in this line is selected
+        let has_selection = selection.as_ref().map(|sel| {
+            chars.iter().enumerate().any(|(col, _)| {
+                sel.contains(Point::new(Line(line), Column(col)))
+            })
+        }).unwrap_or(false);
+
+        let color = if has_selection {
+            // Selected text: bright white (visual feedback)
+            GlyphonColor::rgb(255, 255, 255)
+        } else {
+            chars
+                .iter()
+                .find(|(c, _)| !c.is_whitespace() && *c != '\0')
+                .map(|(_, color)| *color)
+                .unwrap_or(GlyphonColor::rgb(211, 215, 207))
+        };
         row_data.push((line, text, color));
     }
 
