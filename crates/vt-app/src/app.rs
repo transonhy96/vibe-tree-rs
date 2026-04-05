@@ -598,6 +598,11 @@ impl App {
         let mut quit = false;
         let mut ctx_copy = false;
         let mut ctx_paste = false;
+        let mut terminal_scroll: i32 = 0;
+        let mut terminal_mouse_down: Option<egui::Pos2> = None;
+        let mut terminal_mouse_drag: Option<egui::Pos2> = None;
+        let mut terminal_mouse_up = false;
+        let mut terminal_clear = false;
         let mut wt_result: Option<WorktreePanelResult> = None;
         let mut portal_result: Option<PortalPanelResult> = None;
         let mut create_branch = false;
@@ -718,6 +723,48 @@ impl App {
                                 open_project = true;
                             }
                         });
+                    } else if has_terminal {
+                        // Terminal area — capture mouse for selection/scroll/context menu
+                        let rect = ui.available_rect_before_wrap();
+                        let resp = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+
+                        // Scroll
+                        let scroll_delta = ui.input(|i| i.raw_scroll_delta.y);
+                        if scroll_delta != 0.0 {
+                            terminal_scroll = (scroll_delta / 3.0) as i32;
+                        }
+
+                        // Selection via drag
+                        if resp.drag_started() {
+                            if let Some(pos) = resp.interact_pointer_pos() {
+                                terminal_mouse_down = Some(pos);
+                            }
+                        }
+                        if resp.dragged() {
+                            if let Some(pos) = resp.interact_pointer_pos() {
+                                terminal_mouse_drag = Some(pos);
+                            }
+                        }
+                        if resp.drag_stopped() {
+                            terminal_mouse_up = true;
+                        }
+
+                        // Right-click context menu
+                        resp.context_menu(|ui| {
+                            if ui.button("Copy  (Ctrl+Shift+C)").clicked() {
+                                ctx_copy = true;
+                                ui.close_menu();
+                            }
+                            if ui.button("Paste (Ctrl+Shift+V)").clicked() {
+                                ctx_paste = true;
+                                ui.close_menu();
+                            }
+                            ui.separator();
+                            if ui.button("Clear terminal").clicked() {
+                                terminal_clear = true;
+                                ui.close_menu();
+                            }
+                        });
                     }
                 });
 
@@ -807,26 +854,7 @@ impl App {
                 }
             }
 
-            // Right-click context menu
-            if show_ctx_menu {
-                egui::Area::new(egui::Id::new("terminal_context_menu"))
-                    .fixed_pos(ctx_menu_pos)
-                    .order(egui::Order::Foreground)
-                    .show(ctx, |ui| {
-                        egui::Frame::new()
-                            .fill(egui::Color32::from_rgb(45, 45, 48))
-                            .inner_margin(egui::Margin::same(4))
-                            .corner_radius(4.0)
-                            .show(ui, |ui| {
-                                if ui.button("Copy  (Ctrl+Shift+C)").clicked() {
-                                    ctx_copy = true;
-                                }
-                                if ui.button("Paste (Ctrl+Shift+V)").clicked() {
-                                    ctx_paste = true;
-                                }
-                            });
-                    });
-            }
+            // Old context menu removed — now using egui's resp.context_menu()
         });
 
         self.new_branch_name = new_branch;
@@ -955,11 +983,33 @@ impl App {
         if cancel_dialog { self.show_new_branch_dialog = false; }
         if ctx_copy {
             self.copy_selection();
-            self.show_context_menu = false;
         }
         if ctx_paste {
             self.paste_clipboard();
-            self.show_context_menu = false;
+        }
+        if terminal_scroll != 0 {
+            if let Some(terminal) = self.active_terminal() {
+                terminal.scroll(terminal_scroll);
+            }
+        }
+        if let Some(pos) = terminal_mouse_down {
+            if let Some((col, line)) = self.pixel_to_cell(pos.x, pos.y) {
+                if let Some(terminal) = self.active_terminal() {
+                    terminal.start_selection(col, line);
+                }
+            }
+        }
+        if let Some(pos) = terminal_mouse_drag {
+            if let Some((col, line)) = self.pixel_to_cell(pos.x, pos.y) {
+                if let Some(terminal) = self.active_terminal() {
+                    terminal.update_selection(col, line);
+                }
+            }
+        }
+        if terminal_clear {
+            if let Some(terminal) = self.active_terminal() {
+                terminal.write(b"\x0c"); // Ctrl+L clear
+            }
         }
         if let Some(action) = portal_result.and_then(|r| r.action) {
             match action {
@@ -1106,48 +1156,6 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                 }
                 if let Some(gpu) = &self.gpu { gpu.window.request_redraw(); }
-            }
-            WindowEvent::MouseInput { state, button, .. } => {
-                use winit::event::MouseButton;
-                match (button, state) {
-                    (MouseButton::Left, ElementState::Pressed) => {
-                        // Start selection
-                        let pos = self.egui_ctx.input(|i| i.pointer.interact_pos()).unwrap_or_default();
-                        if let Some((col, line)) = self.pixel_to_cell(pos.x, pos.y) {
-                            if let Some(terminal) = self.active_terminal() {
-                                terminal.start_selection(col, line);
-                                self.mouse_selecting = true;
-                            }
-                        }
-                        self.show_context_menu = false;
-                    }
-                    (MouseButton::Left, ElementState::Released) => {
-                        self.mouse_selecting = false;
-                    }
-                    (MouseButton::Right, ElementState::Pressed) => {
-                        // Show context menu
-                        let pos = self.egui_ctx.input(|i| i.pointer.interact_pos()).unwrap_or_default();
-                        self.show_context_menu = true;
-                        self.context_menu_pos = pos;
-                    }
-                    _ => {}
-                }
-                if let Some(gpu) = &self.gpu { gpu.window.request_redraw(); }
-            }
-            WindowEvent::CursorMoved { position, .. } => {
-                if self.mouse_selecting {
-                    let scale = self.gpu.as_ref()
-                        .map(|g| g.window.scale_factor() as f32)
-                        .unwrap_or(1.0);
-                    let x = position.x as f32 / scale;
-                    let y = position.y as f32 / scale;
-                    if let Some((col, line)) = self.pixel_to_cell(x, y) {
-                        if let Some(terminal) = self.active_terminal() {
-                            terminal.update_selection(col, line);
-                        }
-                    }
-                    if let Some(gpu) = &self.gpu { gpu.window.request_redraw(); }
-                }
             }
             _ => {}
         }
