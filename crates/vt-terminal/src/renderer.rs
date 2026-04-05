@@ -189,10 +189,11 @@ impl TerminalRenderer {
         };
 
         if is_scrolled {
-            // Read the bottom N lines from the grid at the actual terminal position
-            let start_line = screen_lines as i32 - live_line_count as i32;
-            for i in start_line..screen_lines as i32 {
-                let line_idx = Line(i as i32 - screen_lines as i32 + 1);
+            // Read the bottom N lines from grid at actual terminal position
+            // Grid lines: Line(-(screen_lines-1)) = top, Line(0) = bottom
+            // We want the last live_line_count lines: Line(-(live_line_count-1)) to Line(0)
+            for i in 0..live_line_count {
+                let line_idx = Line(-(live_line_count as i32 - 1 - i as i32));
                 let mut chars: Vec<(char, GlyphonColor)> = Vec::new();
                 for col_idx in 0..cols {
                     let point = Point::new(line_idx, Column(col_idx));
@@ -200,9 +201,7 @@ impl TerminalRenderer {
                     let fg = resolve_color(cell.fg);
                     chars.push((cell.c, fg));
                 }
-                // Use a fake line index offset for live section positioning
-                let fake_line = 1000 + (i - start_line);
-                Self::push_row(&mut live_rows, fake_line, &chars);
+                Self::push_row(&mut live_rows, i as i32, &chars);
             }
 
             // Hash live rows too
