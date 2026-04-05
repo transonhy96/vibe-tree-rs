@@ -199,18 +199,7 @@ impl App {
         }
     }
 
-    fn setup_cursor_blink(&self) {
-        let proxy = self.proxy.clone();
-        self.rt.spawn(async move {
-            let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
-            loop {
-                interval.tick().await;
-                if proxy.send_event(AppEvent::CursorBlink).is_err() {
-                    break;
-                }
-            }
-        });
-    }
+    // No cursor blink timer — static cursor for performance
 
     fn calc_terminal_size(&self, w: f32, h: f32, cw: f32, ch: f32) -> (u16, u16) {
         let header = 60.0_f32;
@@ -537,7 +526,7 @@ impl ApplicationHandler<AppEvent> for App {
             Ok(window) => {
                 let window = Arc::new(window);
                 self.initialize_gpu(window);
-                self.setup_cursor_blink();
+                // No cursor blink — static cursor
                 let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
                 self.open_project(cwd);
             }

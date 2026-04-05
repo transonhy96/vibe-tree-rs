@@ -7,10 +7,17 @@ use glyphon::{
     Resolution, Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
 };
 use std::sync::Arc;
-use tracing;
 use wgpu;
 
 use crate::instance::EventProxy;
+
+/// Cached line data to avoid re-shaping text every frame.
+struct CachedLine {
+    buffer: GlyphonBuffer,
+    x: f32,
+    y: f32,
+    color: GlyphonColor,
+}
 
 pub struct TerminalRenderer {
     pub font_system: FontSystem,
@@ -22,6 +29,10 @@ pub struct TerminalRenderer {
     pub cell_width: f32,
     pub cell_height: f32,
     font_size: f32,
+    /// Cached shaped lines — only rebuilt when content changes.
+    cached_lines: Vec<CachedLine>,
+    /// Hash of last rendered content to detect changes.
+    last_content_hash: u64,
 }
 
 impl TerminalRenderer {
@@ -43,7 +54,6 @@ impl TerminalRenderer {
         );
         let viewport = Viewport::new(device, &cache);
 
-        // Measure actual monospace cell dimensions
         let metrics = Metrics::new(font_size, font_size * 1.2);
         let mut measure_buf = GlyphonBuffer::new(&mut font_system, metrics);
         measure_buf.set_text(
@@ -53,7 +63,6 @@ impl TerminalRenderer {
             Shaping::Basic,
         );
         measure_buf.shape_until_scroll(&mut font_system, false);
-
         let cell_width = measure_buf
             .layout_runs()
             .next()
@@ -73,10 +82,11 @@ impl TerminalRenderer {
             cell_width,
             cell_height,
             font_size,
+            cached_lines: Vec::new(),
+            last_content_hash: 0,
         }
     }
 
-    /// Prepare terminal content for rendering. Call before render_pass().
     pub fn prepare(
         &mut self,
         term: &Arc<FairMutex<Term<EventProxy>>>,
@@ -99,9 +109,8 @@ impl TerminalRenderer {
         let content = term.renderable_content();
         let screen_lines = term.screen_lines();
 
-        let metrics = Metrics::new(self.font_size, self.cell_height);
-
-        // Collect rows from display_iter, skipping empty (whitespace-only) lines
+        // Build a quick hash of visible content to detect changes
+        let mut content_hash: u64 = 0;
         let mut row_data: Vec<(i32, String, GlyphonColor)> = Vec::new();
         let mut current_line: i32 = i32::MIN;
         let mut current_chars: Vec<(char, GlyphonColor)> = Vec::new();
@@ -109,6 +118,14 @@ impl TerminalRenderer {
         for indexed in content.display_iter {
             let line = indexed.point.line.0;
             let col = indexed.point.column.0;
+            let c = indexed.cell.c;
+
+            // Simple hash
+            content_hash = content_hash
+                .wrapping_mul(31)
+                .wrapping_add(c as u64)
+                .wrapping_add(col as u64 * 97)
+                .wrapping_add(line as u64 * 7919);
 
             if line != current_line {
                 if current_line != i32::MIN {
@@ -122,36 +139,84 @@ impl TerminalRenderer {
                 current_chars.push((' ', GlyphonColor::rgba(0, 0, 0, 0)));
             }
 
-            let fg = self.resolve_color(indexed.cell.fg);
-            current_chars.push((indexed.cell.c, fg));
+            let fg = resolve_color(indexed.cell.fg);
+            current_chars.push((c, fg));
         }
         if current_line != i32::MIN {
             Self::push_row(&mut row_data, current_line, &current_chars);
         }
 
+        // Also hash cursor position
+        let cursor = content.cursor;
+        content_hash = content_hash
+            .wrapping_mul(31)
+            .wrapping_add(cursor.point.line.0 as u64 * 13)
+            .wrapping_add(cursor.point.column.0 as u64 * 17);
+
         drop(term);
 
-        // Position content so last line is at the bottom of visible area,
-        // but if content is shorter than screen, start from the top.
+        // Only rebuild buffers if content changed
+        if content_hash != self.last_content_hash {
+            self.last_content_hash = content_hash;
+            self.rebuild_lines(&row_data, screen_lines, screen_width, screen_height, offset_x, offset_y);
+        }
+
+        // Prepare text areas from cache
+        let text_areas: Vec<TextArea<'_>> = self
+            .cached_lines
+            .iter()
+            .map(|cl| TextArea {
+                buffer: &cl.buffer,
+                left: cl.x,
+                top: cl.y,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: screen_width as i32,
+                    bottom: screen_height as i32,
+                },
+                default_color: cl.color,
+                custom_glyphs: &[],
+            })
+            .collect();
+
+        let _ = self.text_renderer.prepare(
+            device,
+            queue,
+            &mut self.font_system,
+            &mut self.text_atlas,
+            &self.viewport,
+            text_areas,
+            &mut self.swash_cache,
+        );
+    }
+
+    fn rebuild_lines(
+        &mut self,
+        row_data: &[(i32, String, GlyphonColor)],
+        screen_lines: usize,
+        screen_width: u32,
+        screen_height: u32,
+        offset_x: f32,
+        offset_y: f32,
+    ) {
+        let metrics = Metrics::new(self.font_size, self.cell_height);
+
         let last_line = row_data.last().map(|(l, _, _)| *l).unwrap_or(0);
         let first_line = row_data.first().map(|(l, _, _)| *l).unwrap_or(0);
         let content_lines = (last_line - first_line + 1) as f32;
         let available_rows = ((screen_height as f32 - offset_y) / self.cell_height).floor();
 
-        // If content fits on screen, place first line at top.
-        // If content fills or exceeds screen, use absolute grid positions.
         let y_base = if content_lines < available_rows {
-            // Content shorter than screen — start from top
             offset_y - first_line as f32 * self.cell_height
         } else {
-            // Full screen — use absolute positions
             offset_y + screen_lines as f32 * self.cell_height
         };
 
-        let mut buffers: Vec<GlyphonBuffer> = Vec::with_capacity(row_data.len());
-        let mut positions: Vec<(f32, f32, GlyphonColor)> = Vec::with_capacity(row_data.len());
+        self.cached_lines.clear();
 
-        for (line, text, color) in &row_data {
+        for (line, text, color) in row_data {
             let y = y_base + *line as f32 * self.cell_height;
             let x = offset_x;
 
@@ -165,44 +230,15 @@ impl TerminalRenderer {
             );
             buf.shape_until_scroll(&mut self.font_system, false);
 
-            positions.push((x, y, *color));
-            buffers.push(buf);
-        }
-
-        let text_areas: Vec<TextArea<'_>> = buffers
-            .iter()
-            .zip(positions.iter())
-            .map(|(buf, (x, y, color))| TextArea {
+            self.cached_lines.push(CachedLine {
                 buffer: buf,
-                left: *x,
-                top: *y,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: 0,
-                    top: 0,
-                    right: screen_width as i32,
-                    bottom: screen_height as i32,
-                },
-                default_color: *color,
-                custom_glyphs: &[],
-            })
-            .collect();
-
-        let result = self.text_renderer.prepare(
-            device,
-            queue,
-            &mut self.font_system,
-            &mut self.text_atlas,
-            &self.viewport,
-            text_areas,
-            &mut self.swash_cache,
-        );
-        if let Err(e) = result {
-            tracing::error!("glyphon prepare failed: {:?}", e);
+                x,
+                y,
+                color: *color,
+            });
         }
     }
 
-    /// Push a row to row_data if it contains non-whitespace characters.
     fn push_row(
         row_data: &mut Vec<(i32, String, GlyphonColor)>,
         line: i32,
@@ -212,30 +248,27 @@ impl TerminalRenderer {
         if !has_content {
             return;
         }
-
         let text: String = chars.iter().map(|(c, _)| c).collect();
         let color = chars
             .iter()
             .find(|(c, _)| !c.is_whitespace() && *c != '\0')
             .map(|(_, color)| *color)
             .unwrap_or(GlyphonColor::rgb(211, 215, 207));
-
         row_data.push((line, text, color));
     }
 
-    fn resolve_color(&self, color: TermColor) -> GlyphonColor {
-        match color {
-            TermColor::Named(named) => named_to_rgb(named),
-            TermColor::Spec(rgb) => GlyphonColor::rgb(rgb.r, rgb.g, rgb.b),
-            TermColor::Indexed(idx) => indexed_to_rgb(idx),
-        }
-    }
-
-    /// Render the prepared text into the given render pass.
     pub fn render_pass(&self, render_pass: &mut wgpu::RenderPass<'static>) {
         let _ = self
             .text_renderer
             .render(&self.text_atlas, &self.viewport, render_pass);
+    }
+}
+
+fn resolve_color(color: TermColor) -> GlyphonColor {
+    match color {
+        TermColor::Named(named) => named_to_rgb(named),
+        TermColor::Spec(rgb) => GlyphonColor::rgb(rgb.r, rgb.g, rgb.b),
+        TermColor::Indexed(idx) => indexed_to_rgb(idx),
     }
 }
 
