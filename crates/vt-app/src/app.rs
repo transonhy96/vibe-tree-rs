@@ -622,6 +622,18 @@ impl ApplicationHandler<AppEvent> for App {
                     gpu.window.request_redraw();
                 }
             }
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                ..
+            } => {
+                // Clicking the terminal area activates cursor
+                if let Some(renderer) = &mut self.terminal_renderer {
+                    renderer.mark_input();
+                }
+                if let Some(gpu) = &self.gpu {
+                    gpu.window.request_redraw();
+                }
+            }
             WindowEvent::MouseWheel { delta, .. } => {
                 let lines = match delta {
                     winit::event::MouseScrollDelta::LineDelta(_, y) => {
