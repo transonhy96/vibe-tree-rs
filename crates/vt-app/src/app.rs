@@ -24,7 +24,7 @@ struct Workspace {
     sidebar_collapsed: bool,
     portal_collapsed: bool,
     detected_items: Vec<DetectedItem>,
-    last_scan_len: usize, // track how much output we've scanned
+    last_scan_hash: u64, // track content changes for scanning
 }
 
 pub struct App {
@@ -166,7 +166,7 @@ impl App {
             sidebar_collapsed: false,
             portal_collapsed: true, // start collapsed
             detected_items: Vec::new(),
-            last_scan_len: 0,
+            last_scan_hash: 0,
         };
         self.workspaces.push(ws);
         let idx = self.workspaces.len() - 1;
@@ -421,16 +421,22 @@ impl App {
                 if let Some(ws) = self.active_ws_mut() {
                     if let Some(term) = ws.terminals.get(&path) {
                         let text = term.visible_text();
-                        if text.len() != ws.last_scan_len {
-                            ws.last_scan_len = text.len();
+                        // Simple hash to detect content changes
+                        let hash = text.bytes().fold(0u64, |h, b| {
+                            h.wrapping_mul(31).wrapping_add(b as u64)
+                        });
+                        if hash != ws.last_scan_hash {
+                            ws.last_scan_hash = hash;
                             let new_items = scan_output(&text);
-                            // Only add new unique items
                             for item in new_items {
                                 if !ws.detected_items.iter().any(|d| d.value == item.value) {
                                     ws.detected_items.push(item);
                                 }
                             }
-                            // Keep last 50 items
+                            // Auto-expand portal when first items detected
+                            if ws.portal_collapsed && !ws.detected_items.is_empty() {
+                                ws.portal_collapsed = false;
+                            }
                             if ws.detected_items.len() > 50 {
                                 ws.detected_items.drain(0..ws.detected_items.len() - 50);
                             }
@@ -833,6 +839,11 @@ impl App {
                 PortalAction::Close => {
                     if let Some(ws) = self.active_ws_mut() {
                         ws.portal_collapsed = true;
+                    }
+                }
+                PortalAction::ClearItems => {
+                    if let Some(ws) = self.active_ws_mut() {
+                        ws.detected_items.clear();
                     }
                 }
             }

@@ -13,7 +13,7 @@ pub enum DetectedKind {
     Url,
     FilePath,
     BuildOutput,
-    AppLaunch(String), // app name
+    AppLaunch(String),
 }
 
 impl DetectedKind {
@@ -28,12 +28,28 @@ impl DetectedKind {
 
     pub fn color(&self) -> Color32 {
         match self {
-            Self::Url => Color32::from_rgb(114, 159, 207),        // blue
-            Self::FilePath => Color32::from_rgb(138, 226, 52),     // green
-            Self::BuildOutput => Color32::from_rgb(252, 233, 79),  // yellow
-            Self::AppLaunch(_) => Color32::from_rgb(173, 127, 168), // purple
+            Self::Url => Color32::from_rgb(114, 159, 207),
+            Self::FilePath => Color32::from_rgb(138, 226, 52),
+            Self::BuildOutput => Color32::from_rgb(252, 233, 79),
+            Self::AppLaunch(_) => Color32::from_rgb(173, 127, 168),
         }
     }
+}
+
+/// A tracked running process launched from the terminal.
+#[derive(Debug, Clone)]
+pub struct TrackedProcess {
+    pub name: String,
+    pub command: String,
+    pub output_lines: Vec<(String, OutputKind)>, // (line, kind)
+    pub running: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum OutputKind {
+    Stdout,
+    Stderr,
+    Info,
 }
 
 pub enum PortalAction {
@@ -41,6 +57,7 @@ pub enum PortalAction {
     OpenFile(String),
     Close,
     ToggleCollapse,
+    ClearItems,
 }
 
 pub struct PortalPanelResult {
@@ -49,7 +66,7 @@ pub struct PortalPanelResult {
 }
 
 /// Whitelisted applications to detect in terminal output.
-const WHITELISTED_APPS: &[(&str, &str)] = &[
+pub const WHITELISTED_APPS: &[(&str, &str)] = &[
     ("code", "VS Code"),
     ("cursor", "Cursor"),
     ("vim", "Vim"),
@@ -66,6 +83,13 @@ const WHITELISTED_APPS: &[(&str, &str)] = &[
     ("node", "Node.js"),
     ("docker", "Docker"),
     ("git", "Git"),
+    ("make", "Make"),
+    ("cmake", "CMake"),
+    ("go", "Go"),
+    ("rustc", "Rust"),
+    ("unity", "Unity"),
+    ("godot", "Godot"),
+    ("blender", "Blender"),
 ];
 
 /// Scan terminal output text for detectable items.
@@ -75,33 +99,30 @@ pub fn scan_output(text: &str) -> Vec<DetectedItem> {
 
     for line in text.lines() {
         let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
 
-        // Detect URLs (http/https)
+        // Detect URLs
         for word in trimmed.split_whitespace() {
-            if (word.starts_with("http://") || word.starts_with("https://"))
-                && word.len() > 10
+            let clean = word.trim_matches(|c: char| !c.is_alphanumeric() && c != ':' && c != '/' && c != '.' && c != '-' && c != '_');
+            if (clean.starts_with("http://") || clean.starts_with("https://"))
+                && clean.len() > 10
             {
-                // Clean trailing punctuation
-                let url = word.trim_end_matches(|c: char| {
-                    matches!(c, ',' | '.' | ')' | ']' | '"' | '\'')
-                });
                 items.push(DetectedItem {
                     kind: DetectedKind::Url,
-                    value: url.to_string(),
+                    value: clean.to_string(),
                     timestamp: now,
                 });
             }
         }
 
-        // Detect "localhost:PORT" pattern (dev servers)
+        // Detect localhost:PORT
         if let Some(pos) = trimmed.find("localhost:") {
             let rest = &trimmed[pos..];
-            let url = if rest.starts_with("localhost:") {
-                format!("http://{}", rest.split_whitespace().next().unwrap_or(rest))
-            } else {
-                continue;
-            };
-            if url.len() > 16 {
+            let token = rest.split_whitespace().next().unwrap_or(rest);
+            let url = format!("http://{}", token.trim_end_matches(|c: char| !c.is_alphanumeric() && c != ':'));
+            if url.contains(':') && url.len() > 17 {
                 items.push(DetectedItem {
                     kind: DetectedKind::Url,
                     value: url,
@@ -110,14 +131,13 @@ pub fn scan_output(text: &str) -> Vec<DetectedItem> {
             }
         }
 
-        // Detect whitelisted app launches (command at start of line or after $)
+        // Detect whitelisted app launches
         let cmd_part = if let Some(pos) = trimmed.find("$ ") {
             &trimmed[pos + 2..]
         } else {
             trimmed
         };
         let first_word = cmd_part.split_whitespace().next().unwrap_or("");
-        // Strip path prefix
         let cmd_name = first_word.rsplit('/').next().unwrap_or(first_word);
 
         for (cmd, app_name) in WHITELISTED_APPS {
@@ -129,6 +149,33 @@ pub fn scan_output(text: &str) -> Vec<DetectedItem> {
                 });
                 break;
             }
+        }
+
+        // Detect build errors/warnings
+        if trimmed.contains("error[E") || trimmed.contains("error:") {
+            items.push(DetectedItem {
+                kind: DetectedKind::BuildOutput,
+                value: trimmed.chars().take(120).collect(),
+                timestamp: now,
+            });
+        }
+        if trimmed.contains("warning:") && !trimmed.contains("generated") {
+            items.push(DetectedItem {
+                kind: DetectedKind::BuildOutput,
+                value: trimmed.chars().take(120).collect(),
+                timestamp: now,
+            });
+        }
+
+        // Detect file paths being modified/created
+        if (trimmed.contains("Compiling ") || trimmed.contains("Creating ") || trimmed.contains("Writing "))
+            && trimmed.contains('/')
+        {
+            items.push(DetectedItem {
+                kind: DetectedKind::FilePath,
+                value: trimmed.to_string(),
+                timestamp: now,
+            });
         }
     }
 
@@ -150,11 +197,22 @@ pub fn draw_portal_panel(
     if collapsed {
         let panel_response = egui::SidePanel::right("portal_panel")
             .resizable(false)
-            .exact_width(32.0)
+            .exact_width(24.0)
             .frame(panel_frame)
             .show(ctx, |ui| {
-                if ui.button(">").on_hover_text("Open portal").clicked() {
+                if ui.add(egui::Button::new(
+                    RichText::new("<").color(Color32::from_rgb(150, 150, 150))
+                ).small()).on_hover_text("Open portal").clicked() {
                     action = Some(PortalAction::ToggleCollapse);
+                }
+                // Show item count badge
+                if !detected_items.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(format!("{}", detected_items.len()))
+                            .size(10.0)
+                            .color(Color32::from_rgb(66, 133, 244)),
+                    );
                 }
             });
         let w = panel_response.response.rect.width();
@@ -171,9 +229,19 @@ pub fn draw_portal_panel(
             // Header
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Portal").strong().color(Color32::WHITE));
+                ui.label(
+                    RichText::new(format!("({})", detected_items.len()))
+                        .size(11.0)
+                        .color(Color32::from_rgb(100, 100, 100)),
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("<").on_hover_text("Collapse portal").clicked() {
+                    if ui.small_button(">").on_hover_text("Collapse").clicked() {
                         action = Some(PortalAction::ToggleCollapse);
+                    }
+                    if !detected_items.is_empty() {
+                        if ui.small_button("Clear").on_hover_text("Clear all").clicked() {
+                            action = Some(PortalAction::ClearItems);
+                        }
                     }
                 });
             });
@@ -184,8 +252,7 @@ pub fn draw_portal_panel(
                 ui.vertical_centered(|ui| {
                     ui.label(
                         RichText::new("No activity detected")
-                            .color(Color32::from_rgb(100, 100, 100))
-                            .size(13.0),
+                            .color(Color32::from_rgb(100, 100, 100)),
                     );
                     ui.add_space(8.0);
                     ui.label(
@@ -195,51 +262,89 @@ pub fn draw_portal_panel(
                     );
                 });
             } else {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    // Show items grouped by kind, newest first
-                    for item in detected_items.iter().rev() {
-                        let color = item.kind.color();
-                        let label = item.kind.label();
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        // Group by kind
+                        let mut urls: Vec<&DetectedItem> = Vec::new();
+                        let mut builds: Vec<&DetectedItem> = Vec::new();
+                        let mut apps: Vec<&DetectedItem> = Vec::new();
+                        let mut files: Vec<&DetectedItem> = Vec::new();
 
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(label)
-                                    .color(color)
-                                    .size(10.0)
-                                    .strong(),
-                            );
-
+                        for item in detected_items.iter().rev() {
                             match &item.kind {
-                                DetectedKind::Url => {
-                                    if ui.link(
-                                        RichText::new(&item.value)
-                                            .color(Color32::from_rgb(114, 159, 207))
-                                            .size(12.0),
-                                    ).clicked() {
-                                        action = Some(PortalAction::OpenUrl(item.value.clone()));
-                                    }
-                                }
-                                DetectedKind::FilePath => {
-                                    if ui.link(
-                                        RichText::new(&item.value)
-                                            .color(Color32::from_rgb(138, 226, 52))
-                                            .size(12.0),
-                                    ).clicked() {
-                                        action = Some(PortalAction::OpenFile(item.value.clone()));
-                                    }
-                                }
-                                _ => {
-                                    ui.label(
-                                        RichText::new(&item.value)
-                                            .color(Color32::from_rgb(200, 200, 200))
-                                            .size(12.0),
-                                    );
+                                DetectedKind::Url => urls.push(item),
+                                DetectedKind::BuildOutput => builds.push(item),
+                                DetectedKind::AppLaunch(_) => apps.push(item),
+                                DetectedKind::FilePath => files.push(item),
+                            }
+                        }
+
+                        // URLs section
+                        if !urls.is_empty() {
+                            ui.label(RichText::new("URLs").size(11.0).strong().color(Color32::from_rgb(114, 159, 207)));
+                            for item in &urls {
+                                if ui.link(
+                                    RichText::new(&item.value).size(12.0).color(Color32::from_rgb(114, 159, 207)),
+                                ).clicked() {
+                                    action = Some(PortalAction::OpenUrl(item.value.clone()));
                                 }
                             }
-                        });
-                        ui.add_space(2.0);
-                    }
-                });
+                            ui.add_space(8.0);
+                        }
+
+                        // Apps section
+                        if !apps.is_empty() {
+                            ui.label(RichText::new("Applications").size(11.0).strong().color(Color32::from_rgb(173, 127, 168)));
+                            for item in &apps {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(item.kind.label())
+                                            .size(10.0)
+                                            .color(item.kind.color())
+                                            .strong(),
+                                    );
+                                    ui.label(
+                                        RichText::new(&item.value)
+                                            .size(11.0)
+                                            .color(Color32::from_rgb(200, 200, 200)),
+                                    );
+                                });
+                            }
+                            ui.add_space(8.0);
+                        }
+
+                        // Build output section
+                        if !builds.is_empty() {
+                            ui.label(RichText::new("Build Output").size(11.0).strong().color(Color32::from_rgb(252, 233, 79)));
+                            for item in &builds {
+                                let color = if item.value.contains("error") {
+                                    Color32::from_rgb(239, 41, 41)
+                                } else {
+                                    Color32::from_rgb(252, 233, 79)
+                                };
+                                ui.label(
+                                    RichText::new(&item.value)
+                                        .size(11.0)
+                                        .color(color)
+                                        .monospace(),
+                                );
+                            }
+                            ui.add_space(8.0);
+                        }
+
+                        // Files section
+                        if !files.is_empty() {
+                            ui.label(RichText::new("Files").size(11.0).strong().color(Color32::from_rgb(138, 226, 52)));
+                            for item in &files {
+                                ui.label(
+                                    RichText::new(&item.value)
+                                        .size(11.0)
+                                        .color(Color32::from_rgb(138, 226, 52)),
+                                );
+                            }
+                        }
+                    });
             }
         });
 

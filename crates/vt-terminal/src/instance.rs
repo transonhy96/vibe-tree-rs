@@ -100,8 +100,8 @@ impl TerminalInstance {
     }
 
     /// Get visible terminal text as a string (for scanning/detection).
+    /// Returns trimmed lines only (no trailing spaces).
     pub fn visible_text(&self) -> String {
-        use alacritty_terminal::grid::Dimensions;
         let term = self.term.lock();
         let content = term.renderable_content();
         let mut lines: Vec<String> = Vec::new();
@@ -112,14 +112,21 @@ impl TerminalInstance {
             let line = indexed.point.line.0;
             if line != current_line {
                 if current_line != i32::MIN {
-                    lines.push(std::mem::take(&mut current_chars));
+                    let trimmed = current_chars.trim_end().to_string();
+                    if !trimmed.is_empty() {
+                        lines.push(trimmed);
+                    }
+                    current_chars.clear();
                 }
                 current_line = line;
             }
             current_chars.push(indexed.cell.c);
         }
         if !current_chars.is_empty() {
-            lines.push(current_chars);
+            let trimmed = current_chars.trim_end().to_string();
+            if !trimmed.is_empty() {
+                lines.push(trimmed);
+            }
         }
         lines.join("\n")
     }
