@@ -394,8 +394,8 @@ impl App {
     /// Gap between sidebar and terminal content (1 cell width).
     fn terminal_left_offset(&self) -> f32 {
         if self.active_ws().is_none() { return 0.0; }
-        let gap = self.terminal_renderer.as_ref().map(|r| r.cell_width).unwrap_or(10.0);
-        self.sidebar_width + gap
+        let cell = self.terminal_renderer.as_ref().map(|r| r.cell_width).unwrap_or(10.0);
+        self.sidebar_width + cell
     }
 
     /// Convert pixel position to terminal grid coordinates.

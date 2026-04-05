@@ -48,10 +48,8 @@ pub fn draw_worktree_panel(
     }
 
     let panel_response = egui::SidePanel::left("worktree_panel")
-        .resizable(true)
-        .default_width(200.0)
-        .min_width(150.0)
-        .max_width(400.0)
+        .resizable(false)
+        .exact_width(200.0)
         .frame(panel_frame)
         .show(ctx, |ui| {
             // Header row: action buttons only
