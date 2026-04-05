@@ -1,4 +1,5 @@
 use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::Term;
 use alacritty_terminal::vte::ansi::{Color as TermColor, NamedColor};
@@ -11,7 +12,6 @@ use wgpu;
 
 use crate::instance::EventProxy;
 
-/// Cached line data to avoid re-shaping text every frame.
 struct CachedLine {
     buffer: GlyphonBuffer,
     x: f32,
@@ -31,16 +31,13 @@ pub struct TerminalRenderer {
     font_size: f32,
     cached_lines: Vec<CachedLine>,
     last_content_hash: u64,
-    /// Cursor position in pixels (x, y), set during prepare().
     cursor_pos: Option<(f32, f32)>,
-    /// Cursor blink state.
     cursor_blink_visible: bool,
-    /// Whether the terminal has received user input (cursor starts blinking).
     cursor_active: bool,
-    /// Last time user typed — cursor stays solid during typing.
     last_input_time: std::time::Instant,
-    /// Cached cursor glyph buffer.
     cursor_buffer: Option<GlyphonBuffer>,
+    /// Divider line buffer (shown when scrolled)
+    divider_buffer: Option<CachedLine>,
 }
 
 impl TerminalRenderer {
@@ -97,23 +94,20 @@ impl TerminalRenderer {
             cursor_active: false,
             last_input_time: std::time::Instant::now(),
             cursor_buffer: None,
+            divider_buffer: None,
         }
     }
 
-    /// Call when user types — resets blink debounce, keeps cursor solid.
     pub fn mark_input(&mut self) {
         self.cursor_active = true;
         self.cursor_blink_visible = true;
         self.last_input_time = std::time::Instant::now();
     }
 
-    /// Toggle cursor blink state. Returns true if a redraw is needed.
-    /// Only blinks if 500ms have passed since last input (debounce).
     pub fn toggle_cursor_blink(&mut self) -> bool {
         if !self.cursor_active {
             return false;
         }
-        // Stay solid while user is actively typing
         if self.last_input_time.elapsed() < std::time::Duration::from_millis(500) {
             if !self.cursor_blink_visible {
                 self.cursor_blink_visible = true;
@@ -146,9 +140,10 @@ impl TerminalRenderer {
         let term = term.lock();
         let content = term.renderable_content();
         let screen_lines = term.screen_lines();
+        let cols = term.columns();
         let display_offset = term.grid().display_offset();
 
-        // Build a quick hash of visible content to detect changes
+        // Build content hash and row data from display_iter (scrollback view)
         let mut content_hash: u64 = 0;
         let mut row_data: Vec<(i32, String, GlyphonColor)> = Vec::new();
         let mut current_line: i32 = i32::MIN;
@@ -159,7 +154,6 @@ impl TerminalRenderer {
             let col = indexed.point.column.0;
             let c = indexed.cell.c;
 
-            // Simple hash (use wrapping casts for negative line indices)
             content_hash = content_hash
                 .wrapping_mul(31)
                 .wrapping_add(c as u64)
@@ -185,7 +179,41 @@ impl TerminalRenderer {
             Self::push_row(&mut row_data, current_line, &current_chars);
         }
 
-        // Hash cursor position + blink state
+        // If scrolled, also read the live bottom lines directly from grid
+        let mut live_rows: Vec<(i32, String, GlyphonColor)> = Vec::new();
+        let is_scrolled = display_offset > 0;
+        let live_line_count = if is_scrolled {
+            (screen_lines / 3).max(3) // Bottom 1/3 for live view
+        } else {
+            0
+        };
+
+        if is_scrolled {
+            // Read the bottom N lines from the grid at the actual terminal position
+            let start_line = screen_lines as i32 - live_line_count as i32;
+            for i in start_line..screen_lines as i32 {
+                let line_idx = Line(i as i32 - screen_lines as i32 + 1);
+                let mut chars: Vec<(char, GlyphonColor)> = Vec::new();
+                for col_idx in 0..cols {
+                    let point = Point::new(line_idx, Column(col_idx));
+                    let cell = &term.grid()[point];
+                    let fg = resolve_color(cell.fg);
+                    chars.push((cell.c, fg));
+                }
+                // Use a fake line index offset for live section positioning
+                let fake_line = 1000 + (i - start_line);
+                Self::push_row(&mut live_rows, fake_line, &chars);
+            }
+
+            // Hash live rows too
+            for (_, text, _) in &live_rows {
+                for c in text.chars() {
+                    content_hash = content_hash.wrapping_mul(31).wrapping_add(c as u64);
+                }
+            }
+        }
+
+        // Cursor
         let cursor = content.cursor;
         let blink_bit = if self.cursor_active && !self.cursor_blink_visible { 1u64 } else { 0 };
         content_hash = content_hash
@@ -194,33 +222,117 @@ impl TerminalRenderer {
             .wrapping_add(cursor.point.column.0 as u64 * 17)
             .wrapping_add(blink_bit);
 
-        // Store cursor grid position for later pixel calculation in rebuild_lines
         let cursor_line = cursor.point.line.0;
         let cursor_col = cursor.point.column.0;
 
         drop(term);
 
-        // Only rebuild buffers if content changed
+        // Only rebuild if content changed
         if content_hash != self.last_content_hash {
             self.last_content_hash = content_hash;
-            self.rebuild_lines(&row_data, screen_lines, display_offset, screen_width, screen_height, offset_x, offset_y);
 
-            // Compute cursor pixel position using same y_base logic
-            let first_line = row_data.first().map(|(l, _, _)| *l).unwrap_or(0);
-            let last_line = row_data.last().map(|(l, _, _)| *l).unwrap_or(0);
-            let content_rows = (last_line - first_line + 1) as usize;
-            let screen_full = content_rows >= screen_lines;
-            let y_base = if display_offset == 0 && !screen_full {
-                offset_y - first_line as f32 * self.cell_height
+            let available_height = screen_height as f32 - offset_y;
+
+            if is_scrolled {
+                // Split view: scrollback (top 2/3) + divider + live (bottom 1/3)
+                let live_height = live_line_count as f32 * self.cell_height;
+                let divider_height = self.cell_height;
+                let scrollback_height = available_height - live_height - divider_height;
+                let scrollback_rows = (scrollback_height / self.cell_height).floor() as usize;
+
+                // Rebuild scrollback lines (top section)
+                self.rebuild_lines_absolute(
+                    &row_data,
+                    screen_lines,
+                    screen_width,
+                    offset_x,
+                    offset_y,
+                    scrollback_rows,
+                );
+
+                // Build divider line
+                let divider_y = offset_y + scrollback_rows as f32 * self.cell_height;
+                let divider_text = format!(
+                    "{} LIVE {}",
+                    "-".repeat(20),
+                    "-".repeat(20),
+                );
+                let metrics = Metrics::new(self.font_size, self.cell_height);
+                let mut div_buf = GlyphonBuffer::new(&mut self.font_system, metrics);
+                div_buf.set_size(&mut self.font_system, Some(screen_width as f32), None);
+                div_buf.set_text(
+                    &mut self.font_system,
+                    &divider_text,
+                    Attrs::new()
+                        .family(Family::Monospace)
+                        .color(GlyphonColor::rgb(100, 100, 100)),
+                    Shaping::Basic,
+                );
+                div_buf.shape_until_scroll(&mut self.font_system, false);
+                self.divider_buffer = Some(CachedLine {
+                    buffer: div_buf,
+                    x: offset_x,
+                    y: divider_y,
+                    color: GlyphonColor::rgb(100, 100, 100),
+                });
+
+                // Build live lines (bottom section)
+                let live_start_y = divider_y + divider_height;
+                let live_metrics = Metrics::new(self.font_size, self.cell_height);
+                for (i, (_, text, color)) in live_rows.iter().enumerate() {
+                    let y = live_start_y + i as f32 * self.cell_height;
+                    let mut buf = GlyphonBuffer::new(&mut self.font_system, live_metrics);
+                    buf.set_size(&mut self.font_system, Some(screen_width as f32), None);
+                    buf.set_text(
+                        &mut self.font_system,
+                        text,
+                        Attrs::new().family(Family::Monospace).color(*color),
+                        Shaping::Basic,
+                    );
+                    buf.shape_until_scroll(&mut self.font_system, false);
+                    self.cached_lines.push(CachedLine {
+                        buffer: buf,
+                        x: offset_x,
+                        y,
+                        color: *color,
+                    });
+                }
             } else {
-                offset_y + screen_lines as f32 * self.cell_height
-            };
+                // Normal view: no split
+                self.divider_buffer = None;
+                self.rebuild_lines_absolute(
+                    &row_data,
+                    screen_lines,
+                    screen_width,
+                    offset_x,
+                    offset_y,
+                    screen_lines,
+                );
+            }
 
+            // Cursor
+            let y_base = offset_y + screen_lines as f32 * self.cell_height;
             let cx = offset_x + cursor_col as f32 * self.cell_width;
-            let cy = y_base + cursor_line as f32 * self.cell_height;
+            let cy = if is_scrolled {
+                // In split view, cursor is in the live section
+                let scrollback_rows = ((available_height - live_line_count as f32 * self.cell_height - self.cell_height) / self.cell_height).floor() as usize;
+                let live_start_y = offset_y + scrollback_rows as f32 * self.cell_height + self.cell_height;
+                let cursor_row_in_live = (screen_lines as i32 + cursor_line - 1) as f32 - (screen_lines as f32 - live_line_count as f32);
+                live_start_y + cursor_row_in_live.max(0.0) * self.cell_height
+            } else {
+                // Normal positioning
+                let first_line = row_data.first().map(|(l, _, _)| *l).unwrap_or(0);
+                let last_line = row_data.last().map(|(l, _, _)| *l).unwrap_or(0);
+                let content_rows = (last_line - first_line + 1) as usize;
+                let y_base = if content_rows < screen_lines {
+                    offset_y - first_line as f32 * self.cell_height
+                } else {
+                    offset_y + screen_lines as f32 * self.cell_height
+                };
+                y_base + cursor_line as f32 * self.cell_height
+            };
             self.cursor_pos = Some((cx, cy));
 
-            // Build cursor block character
             let show_cursor = !self.cursor_active || self.cursor_blink_visible;
             if show_cursor {
                 let metrics = Metrics::new(self.font_size, self.cell_height);
@@ -228,8 +340,10 @@ impl TerminalRenderer {
                 buf.set_size(&mut self.font_system, Some(self.cell_width * 2.0), None);
                 buf.set_text(
                     &mut self.font_system,
-                    "\u{2588}", // Full block character
-                    Attrs::new().family(Family::Monospace).color(GlyphonColor::rgba(200, 200, 200, 180)),
+                    "\u{2588}",
+                    Attrs::new()
+                        .family(Family::Monospace)
+                        .color(GlyphonColor::rgba(200, 200, 200, 180)),
                     Shaping::Basic,
                 );
                 buf.shape_until_scroll(&mut self.font_system, false);
@@ -239,7 +353,7 @@ impl TerminalRenderer {
             }
         }
 
-        // Prepare text areas from cache + cursor
+        // Build text areas from cache
         let mut text_areas: Vec<TextArea<'_>> = self
             .cached_lines
             .iter()
@@ -258,6 +372,24 @@ impl TerminalRenderer {
                 custom_glyphs: &[],
             })
             .collect();
+
+        // Add divider
+        if let Some(div) = &self.divider_buffer {
+            text_areas.push(TextArea {
+                buffer: &div.buffer,
+                left: div.x,
+                top: div.y,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: screen_width as i32,
+                    bottom: screen_height as i32,
+                },
+                default_color: div.color,
+                custom_glyphs: &[],
+            });
+        }
 
         // Add cursor
         if let (Some((cx, cy)), Some(cursor_buf)) = (self.cursor_pos, &self.cursor_buffer) {
@@ -288,31 +420,26 @@ impl TerminalRenderer {
         );
     }
 
-    fn rebuild_lines(
+    /// Rebuild cached lines using absolute grid positions, limited to max_rows.
+    fn rebuild_lines_absolute(
         &mut self,
         row_data: &[(i32, String, GlyphonColor)],
         screen_lines: usize,
-        display_offset: usize,
         screen_width: u32,
-        screen_height: u32,
         offset_x: f32,
         offset_y: f32,
+        max_rows: usize,
     ) {
         let metrics = Metrics::new(self.font_size, self.cell_height);
 
-        // When not scrolled (display_offset==0) and content doesn't fill screen,
-        // shift content to start at the top. When scrolled or screen is full,
-        // use absolute grid positions.
         let first_line = row_data.first().map(|(l, _, _)| *l).unwrap_or(0);
         let last_line = row_data.last().map(|(l, _, _)| *l).unwrap_or(0);
         let content_rows = (last_line - first_line + 1) as usize;
         let screen_full = content_rows >= screen_lines;
 
-        let y_base = if display_offset == 0 && !screen_full {
-            // Content doesn't fill screen and not scrolled: start from top
+        let y_base = if !screen_full {
             offset_y - first_line as f32 * self.cell_height
         } else {
-            // Screen is full or scrolled: absolute grid positions
             offset_y + screen_lines as f32 * self.cell_height
         };
 
@@ -320,7 +447,10 @@ impl TerminalRenderer {
 
         for (line, text, color) in row_data {
             let y = y_base + *line as f32 * self.cell_height;
-            let x = offset_x;
+            // Skip lines outside the allowed region
+            if y < offset_y - self.cell_height || y > offset_y + max_rows as f32 * self.cell_height {
+                continue;
+            }
 
             let mut buf = GlyphonBuffer::new(&mut self.font_system, metrics);
             buf.set_size(&mut self.font_system, Some(screen_width as f32), None);
@@ -334,7 +464,7 @@ impl TerminalRenderer {
 
             self.cached_lines.push(CachedLine {
                 buffer: buf,
-                x,
+                x: offset_x,
                 y,
                 color: *color,
             });
