@@ -1,24 +1,29 @@
 use alacritty_terminal::event::{Event as TermEvent, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop as PtyEventLoop, EventLoopSender, Msg};
-use std::collections::HashMap;
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{self, Term};
 use alacritty_terminal::tty;
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-/// Forwards terminal events to a channel.
+/// Waker function type — called when the terminal has new content to display.
+pub type WakeupFn = Arc<dyn Fn() + Send + Sync>;
+
+/// Forwards terminal events to a channel and wakes the render loop.
 #[derive(Clone)]
 pub struct EventProxy {
     sender: std::sync::mpsc::Sender<TermEvent>,
+    wakeup: WakeupFn,
 }
 
 impl EventListener for EventProxy {
     fn send_event(&self, event: TermEvent) {
         let _ = self.sender.send(event);
+        (self.wakeup)();
     }
 }
 
@@ -31,9 +36,12 @@ pub struct TerminalInstance {
 }
 
 impl TerminalInstance {
-    pub fn new(cols: u16, rows: u16, cwd: &Path) -> Self {
+    pub fn new(cols: u16, rows: u16, cwd: &Path, wakeup: WakeupFn) -> Self {
         let (event_tx, event_rx) = std::sync::mpsc::channel();
-        let event_proxy = EventProxy { sender: event_tx };
+        let event_proxy = EventProxy {
+            sender: event_tx,
+            wakeup,
+        };
 
         let term_size = TermSize::new(cols as usize, rows as usize);
         let term = Term::new(term::Config::default(), &term_size, event_proxy.clone());
@@ -65,7 +73,6 @@ impl TerminalInstance {
 
         let notifier = event_loop.channel();
 
-        // Spawn the PTY event loop thread
         let pty_thread = std::thread::spawn(move || {
             let _ = event_loop.spawn().join();
         });

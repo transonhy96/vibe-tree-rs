@@ -22,6 +22,8 @@ pub struct App {
     terminal_renderer: Option<TerminalRenderer>,
     config: AppConfig,
     theme_colors: ThemeColors,
+    /// Tracks terminal cols/rows for resize detection.
+    terminal_size: (u16, u16),
 }
 
 impl App {
@@ -42,6 +44,7 @@ impl App {
             terminal_renderer: None,
             config,
             theme_colors,
+            terminal_size: (80, 24),
         }
     }
 
@@ -90,9 +93,89 @@ impl App {
 
     fn spawn_terminal(&mut self) {
         let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
-        let terminal = TerminalInstance::new(80, 24, &cwd);
+
+        // Calculate initial terminal size from window
+        if let Some(renderer) = &self.terminal_renderer {
+            if let Some(gpu) = &self.gpu {
+                let (cols, rows) = self.calc_terminal_size(
+                    gpu.config.width as f32,
+                    gpu.config.height as f32,
+                    renderer.cell_width,
+                    renderer.cell_height,
+                );
+                self.terminal_size = (cols, rows);
+            }
+        }
+
+        // Create a wakeup function that sends a redraw event to winit
+        let proxy = self.proxy.clone();
+        let wakeup = Arc::new(move || {
+            let _ = proxy.send_event(AppEvent::Redraw);
+        });
+
+        let terminal = TerminalInstance::new(
+            self.terminal_size.0,
+            self.terminal_size.1,
+            &cwd,
+            wakeup,
+        );
         self.terminal = Some(terminal);
-        tracing::info!("Terminal spawned");
+        tracing::info!(
+            cols = self.terminal_size.0,
+            rows = self.terminal_size.1,
+            "Terminal spawned"
+        );
+    }
+
+    fn setup_cursor_blink(&self) {
+        let proxy = self.proxy.clone();
+        self.rt.spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
+            loop {
+                interval.tick().await;
+                if proxy.send_event(AppEvent::CursorBlink).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    fn calc_terminal_size(
+        &self,
+        width: f32,
+        height: f32,
+        cell_width: f32,
+        cell_height: f32,
+    ) -> (u16, u16) {
+        // Reserve space for egui header (~60px)
+        let header_height = 60.0_f32;
+        let available_height = (height - header_height).max(cell_height);
+        let cols = (width / cell_width).floor() as u16;
+        let rows = (available_height / cell_height).floor() as u16;
+        (cols.max(2), rows.max(1))
+    }
+
+    fn handle_resize(&mut self, width: u32, height: u32) {
+        if let Some(gpu) = &mut self.gpu {
+            gpu.resize(width, height);
+        }
+
+        // Get cell dimensions first to avoid borrow conflict
+        let cell_dims = self
+            .terminal_renderer
+            .as_ref()
+            .map(|r| (r.cell_width, r.cell_height));
+
+        if let Some((cw, ch)) = cell_dims {
+            let (cols, rows) = self.calc_terminal_size(width as f32, height as f32, cw, ch);
+            if (cols, rows) != self.terminal_size {
+                self.terminal_size = (cols, rows);
+                if let Some(terminal) = &mut self.terminal {
+                    terminal.resize(cols, rows);
+                    tracing::debug!(cols, rows, "Terminal resized");
+                }
+            }
+        }
     }
 
     fn render(&mut self) {
@@ -129,13 +212,16 @@ impl App {
         let egui_state = self.egui_state.as_mut().unwrap();
         let raw_input = egui_state.take_egui_input(&gpu.window);
         let has_terminal = self.terminal.is_some();
+        let term_size = self.terminal_size;
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
-            Self::draw_ui_static(ctx, has_terminal);
+            Self::draw_ui_static(ctx, has_terminal, term_size);
         });
 
         egui_state.handle_platform_output(&gpu.window, full_output.platform_output);
 
-        let paint_jobs = self.egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
+        let paint_jobs = self
+            .egui_ctx
+            .tessellate(full_output.shapes, full_output.pixels_per_point);
 
         let screen_descriptor = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [gpu.config.width, gpu.config.height],
@@ -144,7 +230,6 @@ impl App {
 
         let egui_renderer = self.egui_renderer.as_mut().unwrap();
 
-        // Update egui textures
         for (id, delta) in &full_output.textures_delta.set {
             egui_renderer.update_texture(&gpu.device, &gpu.queue, *id, delta);
         }
@@ -155,7 +240,6 @@ impl App {
                 label: Some("render_encoder"),
             });
 
-        // Update egui buffers
         let _cmds = egui_renderer.update_buffers(
             &gpu.device,
             &gpu.queue,
@@ -164,7 +248,6 @@ impl App {
             &screen_descriptor,
         );
 
-        // Render pass
         let bg = &self.theme_colors.terminal_bg;
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -191,8 +274,7 @@ impl App {
                 renderer.render_pass(&mut render_pass);
             }
 
-            // Render egui on top — requires 'static lifetime render pass
-            // This is safe: we drop the render_pass before accessing encoder again
+            // Render egui on top
             egui_renderer.render(
                 &mut render_pass.forget_lifetime(),
                 &paint_jobs,
@@ -208,7 +290,7 @@ impl App {
         output.present();
     }
 
-    fn draw_ui_static(ctx: &egui::Context, has_terminal: bool) {
+    fn draw_ui_static(ctx: &egui::Context, has_terminal: bool, term_size: (u16, u16)) {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -232,20 +314,18 @@ impl App {
             ui.horizontal(|ui| {
                 ui.heading("VibeTree");
                 ui.separator();
-                ui.label("Vibe code with AI in parallel git worktrees");
+                if has_terminal {
+                    ui.label(format!("Terminal {}x{}", term_size.0, term_size.1));
+                } else {
+                    ui.label("No terminal");
+                }
             });
         });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            if has_terminal {
-                ui.label("Terminal active — GPU-rendered text below");
-                ui.label("Type to interact with the shell");
-            } else {
-                ui.centered_and_justified(|ui| {
-                    ui.label("No terminal active.");
-                });
-            }
-        });
+        // Central panel is transparent — terminal renders behind it
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE)
+            .show(ctx, |_ui| {});
     }
 }
 
@@ -264,6 +344,7 @@ impl ApplicationHandler<AppEvent> for App {
                 let window = Arc::new(window);
                 self.initialize_gpu(window);
                 self.spawn_terminal();
+                self.setup_cursor_blink();
             }
             Err(e) => {
                 tracing::error!("Failed to create window: {}", e);
@@ -297,8 +378,8 @@ impl ApplicationHandler<AppEvent> for App {
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => {
-                if let Some(gpu) = &mut self.gpu {
-                    gpu.resize(size.width, size.height);
+                self.handle_resize(size.width, size.height);
+                if let Some(gpu) = &self.gpu {
                     gpu.window.request_redraw();
                 }
             }
@@ -316,7 +397,7 @@ impl ApplicationHandler<AppEvent> for App {
                         gpu.config.width,
                         gpu.config.height,
                         0.0,
-                        60.0,
+                        60.0, // below egui header
                     );
                 }
                 self.render();
@@ -341,6 +422,11 @@ impl ApplicationHandler<AppEvent> for App {
                         Key::Named(NamedKey::ArrowDown) => terminal.write(b"\x1b[B"),
                         Key::Named(NamedKey::ArrowRight) => terminal.write(b"\x1b[C"),
                         Key::Named(NamedKey::ArrowLeft) => terminal.write(b"\x1b[D"),
+                        Key::Named(NamedKey::Home) => terminal.write(b"\x1b[H"),
+                        Key::Named(NamedKey::End) => terminal.write(b"\x1b[F"),
+                        Key::Named(NamedKey::PageUp) => terminal.write(b"\x1b[5~"),
+                        Key::Named(NamedKey::PageDown) => terminal.write(b"\x1b[6~"),
+                        Key::Named(NamedKey::Delete) => terminal.write(b"\x1b[3~"),
                         _ => {
                             if let Some(text) = text {
                                 terminal.write(text.as_bytes());
@@ -358,7 +444,12 @@ impl ApplicationHandler<AppEvent> for App {
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
-            AppEvent::PtyOutput { .. } | AppEvent::Redraw => {
+            AppEvent::Redraw => {
+                if let Some(gpu) = &self.gpu {
+                    gpu.window.request_redraw();
+                }
+            }
+            AppEvent::PtyOutput { .. } => {
                 if let Some(gpu) = &self.gpu {
                     gpu.window.request_redraw();
                 }
@@ -367,6 +458,7 @@ impl ApplicationHandler<AppEvent> for App {
                 tracing::info!(session_id, code, "PTY exited");
             }
             AppEvent::CursorBlink => {
+                // Toggle cursor visibility and redraw
                 if let Some(gpu) = &self.gpu {
                     gpu.window.request_redraw();
                 }

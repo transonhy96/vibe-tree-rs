@@ -42,7 +42,7 @@ impl TerminalRenderer {
         );
         let viewport = Viewport::new(device, &cache);
 
-        // Approximate cell dimensions for monospace font
+        // Approximate monospace cell dimensions
         let cell_width = font_size * 0.6;
         let cell_height = font_size * 1.2;
 
@@ -70,7 +70,6 @@ impl TerminalRenderer {
         offset_x: f32,
         offset_y: f32,
     ) {
-        // Update viewport resolution
         self.viewport.update(
             queue,
             Resolution {
@@ -82,56 +81,91 @@ impl TerminalRenderer {
         let term = term.lock();
         let content = term.renderable_content();
         let screen_lines = term.screen_lines();
+        let cols = term.columns();
 
         let metrics = Metrics::new(self.font_size, self.cell_height);
 
-        // Collect all text into a single buffer (line by line)
-        let mut line_texts: Vec<(f32, f32, String, GlyphonColor)> = Vec::new();
+        // Build one text line per terminal row for efficient rendering.
+        // Collect row data: (line_index, chars_with_colors)
+        let mut row_data: Vec<(i32, Vec<(char, GlyphonColor)>)> = Vec::new();
+        let mut current_line: i32 = i32::MIN;
+        let mut current_chars: Vec<(char, GlyphonColor)> = Vec::new();
 
         for indexed in content.display_iter {
-            let c = indexed.cell.c;
-            if c == ' ' || c == '\0' {
-                continue;
+            let line = indexed.point.line.0;
+            let col = indexed.point.column.0;
+
+            if line != current_line {
+                if current_line != i32::MIN && !current_chars.is_empty() {
+                    row_data.push((current_line, std::mem::take(&mut current_chars)));
+                }
+                current_line = line;
+                current_chars.clear();
             }
 
-            let x = offset_x + indexed.point.column.0 as f32 * self.cell_width;
-            let y = offset_y + (indexed.point.line.0 as f32 + screen_lines as f32) * self.cell_height;
-            let fg = self.resolve_color(indexed.cell.fg);
+            // Pad with spaces if there are gaps
+            while current_chars.len() < col {
+                current_chars.push((' ', GlyphonColor::rgba(0, 0, 0, 0)));
+            }
 
-            line_texts.push((x, y, c.to_string(), fg));
+            let fg = self.resolve_color(indexed.cell.fg);
+            current_chars.push((indexed.cell.c, fg));
         }
+        if current_line != i32::MIN && !current_chars.is_empty() {
+            row_data.push((current_line, current_chars));
+        }
+
         drop(term);
 
-        // Build text areas from collected data
-        let mut buffers: Vec<GlyphonBuffer> = Vec::with_capacity(line_texts.len());
-        for (_, _, text, color) in &line_texts {
+        // Build glyphon buffers — one per row
+        let mut buffers: Vec<GlyphonBuffer> = Vec::with_capacity(row_data.len());
+        let mut positions: Vec<(f32, f32, GlyphonColor)> = Vec::with_capacity(row_data.len());
+
+        for (line, chars) in &row_data {
+            let y = offset_y + (*line as f32 + screen_lines as f32) * self.cell_height;
+            let x = offset_x;
+
+            // Build the line text and find the dominant color (use first non-space char's color)
+            let text: String = chars.iter().map(|(c, _)| c).collect();
+            let default_color = chars
+                .iter()
+                .find(|(c, _)| *c != ' ' && *c != '\0')
+                .map(|(_, color)| *color)
+                .unwrap_or(GlyphonColor::rgb(211, 215, 207));
+
             let mut buf = GlyphonBuffer::new(&mut self.font_system, metrics);
             buf.set_text(
                 &mut self.font_system,
-                text,
-                Attrs::new().family(Family::Monospace).color(*color),
+                &text,
+                Attrs::new().family(Family::Monospace).color(default_color),
                 Shaping::Basic,
             );
             buf.shape_until_scroll(&mut self.font_system, false);
+
+            positions.push((x, y, default_color));
             buffers.push(buf);
         }
 
-        let text_areas: Vec<TextArea<'_>> = line_texts
+        // Build text areas from buffers
+        let text_areas: Vec<TextArea<'_>> = buffers
             .iter()
-            .zip(buffers.iter())
-            .map(|((x, y, _, color), buf)| TextArea {
-                buffer: buf,
-                left: *x,
-                top: *y,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: *x as i32,
-                    top: *y as i32,
-                    right: (*x + self.cell_width) as i32,
-                    bottom: (*y + self.cell_height) as i32,
-                },
-                default_color: *color,
-                custom_glyphs: &[],
+            .zip(positions.iter())
+            .map(|(buf, (x, y, color))| {
+                let width = cols as f32 * self.cell_width;
+                TextArea {
+                    buffer: buf,
+                    left: *x,
+                    top: *y,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: *x as i32,
+                        top: *y as i32,
+                        right: (*x + width) as i32,
+                        bottom: (*y + self.cell_height) as i32,
+                    },
+                    default_color: *color,
+                    custom_glyphs: &[],
+                }
             })
             .collect();
 
@@ -156,7 +190,9 @@ impl TerminalRenderer {
 
     /// Render the prepared text into the given render pass.
     pub fn render_pass<'a>(&'a self, render_pass: &mut wgpu::RenderPass<'a>) {
-        let _ = self.text_renderer.render(&self.text_atlas, &self.viewport, render_pass);
+        let _ = self
+            .text_renderer
+            .render(&self.text_atlas, &self.viewport, render_pass);
     }
 }
 
