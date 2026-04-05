@@ -101,22 +101,11 @@ impl TerminalRenderer {
     pub fn mark_input(&mut self) {
         self.cursor_active = true;
         self.cursor_blink_visible = true;
-        self.last_input_time = std::time::Instant::now();
     }
 
     pub fn toggle_cursor_blink(&mut self) -> bool {
-        if !self.cursor_active {
-            return false;
-        }
-        if self.last_input_time.elapsed() < std::time::Duration::from_millis(500) {
-            if !self.cursor_blink_visible {
-                self.cursor_blink_visible = true;
-                return true;
-            }
-            return false;
-        }
-        self.cursor_blink_visible = !self.cursor_blink_visible;
-        true
+        // Cursor always visible — no blinking for performance
+        false
     }
 
     pub fn prepare(
@@ -227,7 +216,7 @@ impl TerminalRenderer {
 
         // Cursor
         let cursor = content.cursor;
-        let blink_bit = if self.cursor_active && !self.cursor_blink_visible { 1u64 } else { 0 };
+        let blink_bit = 0u64; // cursor always visible
         content_hash = content_hash
             .wrapping_mul(31)
             .wrapping_add((cursor.point.line.0 as i64 as u64).wrapping_mul(13))
@@ -359,7 +348,7 @@ impl TerminalRenderer {
             };
             self.cursor_pos = Some((cx, cy));
 
-            let show_cursor = !self.cursor_active || self.cursor_blink_visible;
+            let show_cursor = true; // always visible
             if show_cursor {
                 let metrics = Metrics::new(self.font_size, self.cell_height);
                 let mut buf = GlyphonBuffer::new(&mut self.font_system, metrics);

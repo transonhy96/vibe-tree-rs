@@ -734,15 +734,19 @@ impl App {
                             terminal_scroll = (scroll_delta / 3.0) as i32;
                         }
 
-                        // Selection via drag
-                        if resp.drag_started() {
-                            if let Some(pos) = resp.interact_pointer_pos() {
-                                terminal_mouse_down = Some(pos);
-                            }
-                        }
-                        if resp.dragged() {
-                            if let Some(pos) = resp.interact_pointer_pos() {
-                                terminal_mouse_drag = Some(pos);
+                        // Selection: track primary button press/drag
+                        let pointer = ui.input(|i| {
+                            (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.latest_pos())
+                        });
+                        let (just_pressed, is_down, pointer_pos) = pointer;
+
+                        if let Some(pos) = pointer_pos {
+                            if resp.hovered() || resp.is_pointer_button_down_on() {
+                                if just_pressed {
+                                    terminal_mouse_down = Some(pos);
+                                } else if is_down {
+                                    terminal_mouse_drag = Some(pos);
+                                }
                             }
                         }
                         if resp.drag_stopped() {
