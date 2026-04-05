@@ -238,7 +238,7 @@ impl TerminalRenderer {
             if is_scrolled {
                 // Split view: scrollback at top, divider, live at bottom.
                 // All positioned sequentially from offset_y using simple row counting.
-                let actual_live = live_line_count.min(screen_lines / 3).max(2);
+                let actual_live = live_line_count.min(screen_lines * 2 / 3).max(2);
                 let scrollback_display_rows = screen_lines - actual_live - 1;
 
                 // Scrollback: render row_data lines sequentially from top.
@@ -321,7 +321,7 @@ impl TerminalRenderer {
             let cx = offset_x + cursor_col as f32 * self.cell_width;
             let cy = if is_scrolled {
                 // Cursor in live section
-                let actual_live = live_line_count.min(screen_lines / 3).max(2);
+                let actual_live = live_line_count.min(screen_lines * 2 / 3).max(2);
                 let scrollback_display_rows = screen_lines - actual_live - 1;
                 let divider_y = offset_y + scrollback_display_rows as f32 * self.cell_height;
                 let live_start_y = divider_y + self.cell_height;
