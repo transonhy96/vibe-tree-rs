@@ -331,7 +331,7 @@ impl TerminalRenderer {
                 let y_base = if content_rows < screen_lines {
                     offset_y - first_line as f32 * self.cell_height
                 } else {
-                    offset_y + screen_lines as f32 * self.cell_height
+                    offset_y + (screen_lines - 1) as f32 * self.cell_height
                 };
                 y_base + cursor_line as f32 * self.cell_height
             };
@@ -444,7 +444,7 @@ impl TerminalRenderer {
         let y_base = if !screen_full {
             offset_y - first_line as f32 * self.cell_height
         } else {
-            offset_y + screen_lines as f32 * self.cell_height
+            offset_y + (screen_lines - 1) as f32 * self.cell_height
         };
 
         self.cached_lines.clear();
