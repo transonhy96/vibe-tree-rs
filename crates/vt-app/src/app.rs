@@ -1381,8 +1381,7 @@ impl App {
                                         width: rect.width,
                                         height: rect.height,
                                     };
-                                    let _ = backend.set_bounds(win_id, abs_rect);
-                                    let _ = backend.raise_window(win_id);
+                                    let _ = backend.float_and_position(win_id, abs_rect);
 
                                     if let Some(ws) = self.active_ws_mut() {
                                         ws.embedded_window = Some(vt_embed::EmbeddedWindow {

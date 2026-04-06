@@ -49,7 +49,6 @@ impl EmbeddedWindow {
         #[cfg(target_os = "linux")]
         {
             if self.overlay_mode {
-                // Get parent position and compute absolute coords
                 let parent_pos = self.backend.get_window_position(self.parent_window_id);
                 let abs_rect = EmbedRect {
                     x: parent_pos.0 + rect.x,
@@ -57,8 +56,7 @@ impl EmbeddedWindow {
                     width: rect.width,
                     height: rect.height,
                 };
-                self.backend.set_bounds(self.child_id, abs_rect)?;
-                self.backend.raise_window(self.child_id)?;
+                self.backend.float_and_position(self.child_id, abs_rect)?;
                 Ok(())
             } else {
                 self.backend.set_bounds(self.child_id, rect)
@@ -139,17 +137,16 @@ pub fn embed_window_by_name(
         // Get parent window position on screen for absolute positioning
         let parent_pos = backend.get_window_position(parent_window_id);
 
-        // Position child window over the portal area (no reparent)
+        // Float and position child window over the portal area
         let abs_rect = EmbedRect {
             x: parent_pos.0 + rect.x,
             y: parent_pos.1 + rect.y,
             width: rect.width,
             height: rect.height,
         };
-        backend.set_bounds(child_id, abs_rect)?;
-        backend.raise_window(child_id)?;
+        backend.float_and_position(child_id, abs_rect)?;
 
-        tracing::info!(child_id, name, "Window overlaid (no reparent)");
+        tracing::info!(child_id, name, "Window floated and positioned");
 
         Ok(EmbeddedWindow {
             child_id,

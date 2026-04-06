@@ -116,6 +116,43 @@ impl X11Backend {
         Ok(())
     }
 
+    /// Make window floating (for tiling WMs like i3/sway) and position it.
+    pub fn float_and_position(&self, window: u64, rect: EmbedRect) -> Result<(), EmbedError> {
+        // Try i3-msg to make window floating
+        let win_id = format!("[id={}]", window);
+        let _ = std::process::Command::new("i3-msg")
+            .args([&win_id, "floating", "enable"])
+            .output();
+        // Also try swaymsg for Wayland
+        let _ = std::process::Command::new("swaymsg")
+            .args([&win_id, "floating", "enable"])
+            .output();
+
+        // Remove window border/decorations
+        let _ = std::process::Command::new("i3-msg")
+            .args([&win_id, "border", "none"])
+            .output();
+
+        // Now position with xdotool (works after floating)
+        let _ = std::process::Command::new("xdotool")
+            .args([
+                "windowsize", &window.to_string(),
+                &rect.width.to_string(), &rect.height.to_string(),
+            ])
+            .output();
+        let _ = std::process::Command::new("xdotool")
+            .args([
+                "windowmove", &window.to_string(),
+                &rect.x.to_string(), &rect.y.to_string(),
+            ])
+            .output();
+        let _ = std::process::Command::new("xdotool")
+            .args(["windowraise", &window.to_string()])
+            .output();
+
+        Ok(())
+    }
+
     pub fn get_window_position(&self, window: u64) -> (i32, i32) {
         unsafe {
             let mut x: c_int = 0;
