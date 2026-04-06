@@ -399,6 +399,19 @@ impl App {
         x >= left && y >= header
     }
 
+    fn setup_cursor_blink(&self) {
+        let proxy = self.proxy.clone();
+        self.rt.spawn(async move {
+            let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(600));
+            loop {
+                interval.tick().await;
+                if proxy.send_event(AppEvent::CursorBlink).is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
     fn terminal_left_offset(&self) -> f32 {
         if self.active_ws().is_none() { return 0.0; }
         let cell = self.terminal_renderer.as_ref().map(|r| r.cell_width).unwrap_or(10.0);
@@ -623,6 +636,11 @@ impl App {
         let detected_items: Vec<DetectedItem> = self.active_ws()
             .map(|ws| ws.detected_items.clone())
             .unwrap_or_default();
+        // Get scroll info for scrollbar
+        let (scroll_offset, scroll_total) = self.active_terminal()
+            .map(|t| t.scroll_info())
+            .unwrap_or((0, 0));
+
         // Compute selection highlight rects
         let selection_rects: Vec<(f32, f32, f32, f32)> = {
             let mut rects = Vec::new();
@@ -797,8 +815,6 @@ impl App {
                             );
                         });
                     } else if has_terminal {
-                        // Set text cursor for terminal area
-                        ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Text);
                         // Draw selection highlight backgrounds
                         for &(x, y, w, h) in &selection_rects {
                             let rect = egui::Rect::from_min_size(
@@ -809,6 +825,35 @@ impl App {
                                 rect, 0.0,
                                 egui::Color32::from_rgba_unmultiplied(200, 200, 255, 50),
                             );
+                        }
+
+                        // Scrollbar on right edge
+                        if scroll_total > 0 {
+                            let panel_rect = ui.max_rect();
+                            let bar_width = 6.0;
+                            let track_height = panel_rect.height();
+                            let track_x = panel_rect.right() - bar_width - 2.0;
+                            let track_y = panel_rect.top();
+
+                            // Draw track (subtle)
+                            let track_rect = egui::Rect::from_min_size(
+                                egui::pos2(track_x, track_y),
+                                egui::vec2(bar_width, track_height),
+                            );
+                            ui.painter().rect_filled(track_rect, 3.0,
+                                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 10));
+
+                            // Thumb
+                            let visible = self.terminal_size.1 as f32;
+                            let total = scroll_total as f32 + visible;
+                            let thumb_h = (visible / total * track_height).max(20.0);
+                            let thumb_y = track_y + (1.0 - (scroll_offset as f32 + visible) / total) * (track_height - thumb_h);
+                            let thumb_rect = egui::Rect::from_min_size(
+                                egui::pos2(track_x, thumb_y),
+                                egui::vec2(bar_width, thumb_h),
+                            );
+                            ui.painter().rect_filled(thumb_rect, 3.0,
+                                egui::Color32::from_rgba_unmultiplied(200, 200, 200, 80));
                         }
                     }
                 });
@@ -1014,6 +1059,29 @@ impl App {
         gpu.queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
+        // Set cursor based on area and egui state
+        if let Some(gpu) = &self.gpu {
+            let (mx, my) = self.last_mouse_pos;
+            let egui_cursor = self.egui_ctx.output(|o| o.cursor_icon);
+            if self.is_in_terminal_area(mx, my) && !self.show_context_menu
+                && egui_cursor == egui::CursorIcon::Default
+            {
+                gpu.window.set_cursor(winit::window::Cursor::Icon(winit::window::CursorIcon::Text));
+            } else {
+                // Map egui cursor to winit cursor
+                let winit_cursor = match egui_cursor {
+                    egui::CursorIcon::PointingHand => winit::window::CursorIcon::Pointer,
+                    egui::CursorIcon::Text => winit::window::CursorIcon::Text,
+                    egui::CursorIcon::ResizeColumn => winit::window::CursorIcon::ColResize,
+                    egui::CursorIcon::ResizeRow => winit::window::CursorIcon::RowResize,
+                    egui::CursorIcon::Grab => winit::window::CursorIcon::Grab,
+                    egui::CursorIcon::Grabbing => winit::window::CursorIcon::Grabbing,
+                    _ => winit::window::CursorIcon::Default,
+                };
+                gpu.window.set_cursor(winit::window::Cursor::Icon(winit_cursor));
+            }
+        }
+
         // Process deferred actions
         if quit {
             self.wants_quit = true;
@@ -1178,6 +1246,7 @@ impl ApplicationHandler<AppEvent> for App {
                 self.initialize_gpu(window);
                 // Restore previously open workspaces
                 self.restore_workspaces();
+                self.setup_cursor_blink();
             }
             Err(e) => tracing::error!("Window creation failed: {}", e),
         }
@@ -1226,6 +1295,7 @@ impl ApplicationHandler<AppEvent> for App {
                 let y = position.y as f32 / scale;
                 self.last_mouse_pos = (x, y);
                 self.last_mouse_cell = self.pixel_to_cell(x, y);
+                // Cursor is set after egui frame in do_frame
                 if self.mouse_selecting {
                     if let Some((col, line)) = self.last_mouse_cell {
                         if let Some(terminal) = self.active_terminal() {
@@ -1347,8 +1417,16 @@ impl ApplicationHandler<AppEvent> for App {
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
-            AppEvent::Redraw | AppEvent::PtyOutput { .. } | AppEvent::CursorBlink => {
+            AppEvent::Redraw | AppEvent::PtyOutput { .. } => {
                 if let Some(gpu) = &self.gpu { gpu.window.request_redraw(); }
+            }
+            AppEvent::CursorBlink => {
+                if let Some(renderer) = &mut self.terminal_renderer {
+                    if renderer.toggle_cursor_blink() {
+                        renderer.last_content_hash = 0; // force rebuild
+                        if let Some(gpu) = &self.gpu { gpu.window.request_redraw(); }
+                    }
+                }
             }
             AppEvent::PtyExited { session_id, code } => {
                 tracing::info!(session_id, code, "PTY exited");

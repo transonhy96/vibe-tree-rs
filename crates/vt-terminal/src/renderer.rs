@@ -104,8 +104,8 @@ impl TerminalRenderer {
     }
 
     pub fn toggle_cursor_blink(&mut self) -> bool {
-        // Cursor always visible — no blinking for performance
-        false
+        self.cursor_blink_visible = !self.cursor_blink_visible;
+        true
     }
 
     pub fn prepare(
@@ -216,7 +216,7 @@ impl TerminalRenderer {
 
         // Cursor
         let cursor = content.cursor;
-        let blink_bit = 0u64; // cursor always visible
+        let blink_bit = if self.cursor_blink_visible { 1u64 } else { 0 };
         content_hash = content_hash
             .wrapping_mul(31)
             .wrapping_add((cursor.point.line.0 as i64 as u64).wrapping_mul(13))
@@ -348,7 +348,7 @@ impl TerminalRenderer {
             };
             self.cursor_pos = Some((cx, cy));
 
-            let show_cursor = true; // always visible
+            let show_cursor = self.cursor_blink_visible;
             if show_cursor {
                 let metrics = Metrics::new(self.font_size, self.cell_height);
                 let mut buf = GlyphonBuffer::new(&mut self.font_system, metrics);

@@ -175,6 +175,16 @@ impl TerminalInstance {
         term.selection_to_string()
     }
 
+    /// Get scroll info: (display_offset, history_size).
+    pub fn scroll_info(&self) -> (usize, usize) {
+        use alacritty_terminal::grid::Dimensions;
+        let term = self.term.lock();
+        let offset = term.grid().display_offset();
+        let total = term.grid().total_lines();
+        let screen = term.grid().screen_lines();
+        (offset, total.saturating_sub(screen))
+    }
+
     /// Scroll the terminal display.
     pub fn scroll(&self, delta: i32) {
         self.term.lock().scroll_display(Scroll::Delta(delta));
