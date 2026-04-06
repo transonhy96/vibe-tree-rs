@@ -406,6 +406,7 @@ impl App {
     }
 
     /// Convert pixel position to terminal grid coordinates.
+    /// Accounts for scroll offset so selection works in scrollback.
     fn pixel_to_cell(&self, x: f32, y: f32) -> Option<(usize, i32)> {
         let renderer = self.terminal_renderer.as_ref()?;
         let header = 80.0;
@@ -413,10 +414,21 @@ impl App {
         let term_x = (x - left).max(0.0);
         let term_y = (y - header).max(0.0);
         let col = (term_x / renderer.cell_width) as usize;
-        let line = (term_y / renderer.cell_height) as i32;
+        let screen_row = (term_y / renderer.cell_height) as i32;
+
+        // Account for scroll offset: when scrolled, visible lines shift up
+        let display_offset = self.active_terminal()
+            .map(|t| {
+                let term = t.term.lock();
+                term.grid().display_offset() as i32
+            })
+            .unwrap_or(0);
+
+        let line = screen_row - display_offset;
+
         let max_col = self.terminal_size.0 as usize;
         let max_line = self.terminal_size.1 as i32;
-        Some((col.min(max_col.saturating_sub(1)), line.clamp(0, max_line - 1)))
+        Some((col.min(max_col.saturating_sub(1)), line.clamp(-display_offset, max_line - 1)))
     }
 
     fn copy_selection(&mut self) {
@@ -623,14 +635,20 @@ impl App {
                         let cw = renderer.cell_width;
                         let ch = renderer.cell_height;
                         let cols = self.terminal_size.0 as usize;
+                        let display_offset = term.grid().display_offset() as i32;
 
                         for line in sel.start.line.0..=sel.end.line.0 {
+                            // Convert grid line to screen row
+                            let screen_row = line + display_offset;
                             let sc = if line == sel.start.line.0 { sel.start.column.0 } else { 0 };
                             let ec = if line == sel.end.line.0 { sel.end.column.0 + 1 } else { cols };
                             let x = sidebar + sc as f32 * cw;
-                            let y = header + line as f32 * ch;
+                            let y = header + screen_row as f32 * ch;
                             let w = (ec - sc) as f32 * cw;
-                            rects.push((x, y, w, ch));
+                            // Only draw if on screen
+                            if y >= header && y < header + self.terminal_size.1 as f32 * ch {
+                                rects.push((x, y, w, ch));
+                            }
                         }
                     }
                 }
