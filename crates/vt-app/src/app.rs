@@ -53,6 +53,8 @@ pub struct App {
     sidebar_width: f32,
     wants_quit: bool,
     mouse_selecting: bool,
+    scrollbar_active: bool,
+    scrollbar_grab_offset: f32, // where user grabbed the thumb (0=top of thumb, thumb_h=bottom)
     last_mouse_cell: Option<(usize, i32)>,
     last_mouse_pos: (f32, f32),
     show_context_menu: bool,
@@ -88,6 +90,8 @@ impl App {
             sidebar_width: 200.0,
             wants_quit: false,
             mouse_selecting: false,
+            scrollbar_active: false,
+            scrollbar_grab_offset: 0.0,
             last_mouse_cell: None,
             last_mouse_pos: (0.0, 0.0),
             show_context_menu: false,
@@ -396,7 +400,7 @@ impl App {
     fn is_in_terminal_area(&self, x: f32, y: f32) -> bool {
         let left = self.terminal_left_offset();
         let header = 80.0;
-        x >= left && y >= header
+        x >= left && y >= header && !self.scrollbar_active
     }
 
     fn setup_cursor_blink(&self) {
@@ -694,6 +698,9 @@ impl App {
         let mut terminal_mouse_up = false;
         let mut terminal_clear = false;
         let mut close_ctx_menu = false;
+        let mut scrollbar_hovered = false;
+        let mut terminal_scroll_to: Option<usize> = None;
+        let mut scrollbar_grab_offset = self.scrollbar_grab_offset;
         let mut wt_result: Option<WorktreePanelResult> = None;
         let mut portal_result: Option<PortalPanelResult> = None;
         let mut create_branch = false;
@@ -856,30 +863,46 @@ impl App {
                                 egui::vec2(bar_width, thumb_h),
                             );
 
-                            // Interactive thumb
-                            let thumb_resp = ui.interact(thumb_rect, egui::Id::new("scrollbar_thumb"), egui::Sense::drag());
-                            let thumb_color = if thumb_resp.dragged() || thumb_resp.hovered() {
+                            let track_resp = ui.interact(track_rect, egui::Id::new("scrollbar"), egui::Sense::click_and_drag());
+                            scrollbar_hovered = track_resp.hovered() || track_resp.dragged();
+
+                            let thumb_color = if scrollbar_hovered {
                                 egui::Color32::from_rgba_unmultiplied(220, 220, 220, 160)
                             } else {
                                 egui::Color32::from_rgba_unmultiplied(180, 180, 180, 100)
                             };
                             ui.painter().rect_filled(thumb_rect, 3.0, thumb_color);
 
-                            // Drag to scroll
-                            if thumb_resp.dragged() {
-                                let delta_y = thumb_resp.drag_delta().y;
-                                let lines_per_pixel = scroll_total as f32 / (track_height - thumb_h).max(1.0);
-                                terminal_scroll = -(delta_y * lines_per_pixel) as i32;
+                            let scrollable = (track_height - thumb_h).max(1.0);
+
+                            if track_resp.drag_started() {
+                                // Record where on the thumb user grabbed
+                                if let Some(pos) = track_resp.interact_pointer_pos() {
+                                    if thumb_rect.contains(pos) {
+                                        // Grabbed the thumb — offset from thumb top
+                                        scrollbar_grab_offset = pos.y - thumb_y;
+                                    } else {
+                                        // Clicked on track — center thumb on click
+                                        scrollbar_grab_offset = thumb_h / 2.0;
+                                    }
+                                }
                             }
 
-                            // Click on track to jump
-                            let track_resp = ui.interact(track_rect, egui::Id::new("scrollbar_track"), egui::Sense::click());
-                            if track_resp.clicked() {
+                            if track_resp.dragged() {
                                 if let Some(pos) = track_resp.interact_pointer_pos() {
-                                    let click_ratio = (pos.y - track_y) / track_height;
-                                    let target_offset = ((1.0 - click_ratio) * scroll_total as f32) as i32;
-                                    let current = scroll_offset as i32;
-                                    terminal_scroll = target_offset - current;
+                                    // Position of thumb top based on grab offset
+                                    let new_thumb_top = pos.y - track_y - scrollbar_grab_offset;
+                                    let ratio = (new_thumb_top / scrollable).clamp(0.0, 1.0);
+                                    let target = ((1.0 - ratio) * scroll_total as f32) as usize;
+                                    terminal_scroll_to = Some(target);
+                                }
+                            } else if track_resp.clicked() {
+                                if let Some(pos) = track_resp.interact_pointer_pos() {
+                                    // Click on track: center thumb at click position
+                                    let new_thumb_top = pos.y - track_y - thumb_h / 2.0;
+                                    let ratio = (new_thumb_top / scrollable).clamp(0.0, 1.0);
+                                    let target = ((1.0 - ratio) * scroll_total as f32) as usize;
+                                    terminal_scroll_to = Some(target);
                                 }
                             }
                         }
@@ -1087,6 +1110,9 @@ impl App {
         gpu.queue.submit(std::iter::once(encoder.finish()));
         output.present();
 
+        self.scrollbar_active = scrollbar_hovered;
+        self.scrollbar_grab_offset = scrollbar_grab_offset;
+
         // Set cursor based on area and egui state
         if let Some(gpu) = &self.gpu {
             let (mx, my) = self.last_mouse_pos;
@@ -1193,6 +1219,11 @@ impl App {
         if terminal_scroll != 0 {
             if let Some(terminal) = self.active_terminal() {
                 terminal.scroll(terminal_scroll);
+            }
+        }
+        if let Some(offset) = terminal_scroll_to {
+            if let Some(terminal) = self.active_terminal() {
+                terminal.scroll_to(offset);
             }
         }
         if let Some(pos) = terminal_mouse_down {

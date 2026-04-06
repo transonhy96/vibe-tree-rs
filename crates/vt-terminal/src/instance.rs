@@ -185,9 +185,20 @@ impl TerminalInstance {
         (offset, total.saturating_sub(screen))
     }
 
-    /// Scroll the terminal display.
+    /// Scroll the terminal display by delta lines.
     pub fn scroll(&self, delta: i32) {
         self.term.lock().scroll_display(Scroll::Delta(delta));
+    }
+
+    /// Scroll to an absolute offset (0 = bottom, history_size = top).
+    pub fn scroll_to(&self, offset: usize) {
+        use alacritty_terminal::grid::Dimensions;
+        let mut term = self.term.lock();
+        let current = term.grid().display_offset();
+        let delta = offset as i32 - current as i32;
+        if delta != 0 {
+            term.scroll_display(Scroll::Delta(delta));
+        }
     }
 
     /// Resize the terminal.
