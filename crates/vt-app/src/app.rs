@@ -789,14 +789,16 @@ impl App {
                                     .size(16.0)
                                     .color(egui::Color32::from_rgb(150, 150, 150)),
                             );
-                            ui.add_space(30.0);
-                            if ui.button(
-                                egui::RichText::new("  Open Project Folder  ").size(16.0)
-                            ).clicked() {
-                                open_project = true;
-                            }
+                            ui.add_space(12.0);
+                            ui.label(
+                                egui::RichText::new("Press + or File > Open Project to get started")
+                                    .size(12.0)
+                                    .color(egui::Color32::from_rgb(80, 80, 80)),
+                            );
                         });
                     } else if has_terminal {
+                        // Set text cursor for terminal area
+                        ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Text);
                         // Draw selection highlight backgrounds
                         for &(x, y, w, h) in &selection_rects {
                             let rect = egui::Rect::from_min_size(
