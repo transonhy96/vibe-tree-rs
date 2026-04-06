@@ -57,6 +57,7 @@ pub struct App {
     scrollbar_grab_offset: f32,
     portal_width: f32,
     last_scroll_time: std::time::Instant,
+    pending_embed: Option<(String, std::time::Instant, u8)>, // (name, start_time, retries)
     last_mouse_cell: Option<(usize, i32)>,
     last_mouse_pos: (f32, f32),
     show_context_menu: bool,
@@ -94,6 +95,7 @@ impl App {
             mouse_selecting: false,
             scrollbar_active: false,
             scrollbar_grab_offset: 0.0,
+            pending_embed: None,
             last_scroll_time: std::time::Instant::now(),
             portal_width: 0.0,
             last_mouse_cell: None,
@@ -645,17 +647,31 @@ impl App {
             }
         }
 
-        // Auto-embed detected app (delayed to allow window creation)
+        // Auto-embed: set pending embed when new app detected
         if let Some(name) = auto_embed_name {
-            let proxy = self.proxy.clone();
-            let name_clone = name.clone();
-            self.rt.spawn(async move {
-                // Wait for the app to create its window
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-                let _ = proxy.send_event(AppEvent::Redraw);
-            });
-            // Try immediately too in case window already exists
-            self.try_embed_by_name(&name);
+            tracing::info!(name = %name, "Auto-embed: starting retry loop");
+            self.pending_embed = Some((name, std::time::Instant::now(), 0));
+        }
+
+        // Process pending embed: retry every 1s for up to 10 attempts
+        if let Some((ref name, start, retries)) = self.pending_embed.clone() {
+            let has_embedded = self.active_ws().map(|ws| ws.embedded_window.is_some()).unwrap_or(false);
+            if has_embedded {
+                self.pending_embed = None;
+            } else if retries < 10 && start.elapsed().as_millis() > (retries as u128 * 1000) {
+                tracing::info!(name = %name, retries, "Auto-embed: trying...");
+                self.try_embed_by_name(name);
+                self.pending_embed = Some((name.clone(), start, retries + 1));
+                // Schedule redraw for next retry
+                let proxy = self.proxy.clone();
+                self.rt.spawn(async move {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    let _ = proxy.send_event(AppEvent::Redraw);
+                });
+            } else if retries >= 10 {
+                tracing::warn!(name = %name, "Auto-embed: gave up after 10 retries");
+                self.pending_embed = None;
+            }
         }
 
         let gpu = match &self.gpu { Some(g) => g, None => return };
