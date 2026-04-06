@@ -876,12 +876,8 @@ impl App {
 
             // Right-click context menu (positioned at cursor)
             if show_ctx_menu {
-                let menu_pos = egui::Pos2::new(
-                    self.last_mouse_pos.0,
-                    self.last_mouse_pos.1,
-                );
                 egui::Area::new(egui::Id::new("terminal_context_menu"))
-                    .fixed_pos(menu_pos)
+                    .fixed_pos(ctx_menu_pos)
                     .order(egui::Order::Foreground)
                     .show(ctx, |ui| {
                         egui::Frame::new()
@@ -1066,6 +1062,13 @@ impl App {
         if close_ctx_menu {
             self.show_context_menu = false;
         }
+        // Dismiss context menu if user clicked outside it (no action taken)
+        if self.show_context_menu && !ctx_copy && !ctx_paste && !terminal_clear && !close_ctx_menu {
+            let clicked = self.egui_ctx.input(|i| i.pointer.primary_clicked());
+            if clicked {
+                self.show_context_menu = false;
+            }
+        }
         if terminal_scroll != 0 {
             if let Some(terminal) = self.active_terminal() {
                 terminal.scroll(terminal_scroll);
@@ -1164,8 +1167,9 @@ impl ApplicationHandler<AppEvent> for App {
                     let (mx, my) = self.last_mouse_pos;
                     let in_terminal = self.is_in_terminal_area(mx, my);
                     if *state == ElementState::Pressed {
-                        self.show_context_menu = false;
-                        if in_terminal {
+                        // Don't dismiss context menu here — let egui handle the click first.
+                        // Menu closes via close_ctx_menu after egui processes button clicks.
+                        if in_terminal && !self.show_context_menu {
                             self.mouse_selecting = true;
                             if let Some((col, line)) = self.last_mouse_cell {
                                 if let Some(terminal) = self.active_terminal() {
@@ -1182,12 +1186,11 @@ impl ApplicationHandler<AppEvent> for App {
                     && self.is_in_terminal_area(self.last_mouse_pos.0, self.last_mouse_pos.1)
                 {
                     self.show_context_menu = true;
+                    self.context_menu_pos = egui::Pos2::new(
+                        self.last_mouse_pos.0,
+                        self.last_mouse_pos.1,
+                    );
                     if let Some(gpu) = &self.gpu {
-                        let scale = gpu.window.scale_factor() as f32;
-                        // Store position from last cursor move
-                        if let Some((col, _)) = self.last_mouse_cell {
-                            // Use raw cursor position for context menu
-                        }
                         gpu.window.request_redraw();
                     }
                 }
