@@ -1472,6 +1472,21 @@ impl ApplicationHandler<AppEvent> for App {
                     let (mx, my) = self.last_mouse_pos;
                     let in_terminal = self.is_in_terminal_area(mx, my);
                     if *state == ElementState::Pressed {
+                        // Ctrl+Click on URL → open in browser
+                        let ctrl_held = self.egui_ctx.input(|i| i.modifiers.ctrl);
+                        if ctrl_held && in_terminal {
+                            if let Some((col, line)) = self.last_mouse_cell {
+                                if let Some(renderer) = &self.terminal_renderer {
+                                    if let Some(url) = renderer.url_at_cell(col, line) {
+                                        let url = url.to_string();
+                                        tracing::info!(url = %url, "Opening URL");
+                                        let _ = open::that(&url);
+                                        return; // Don't start selection
+                                    }
+                                }
+                            }
+                        }
+
                         // Don't dismiss context menu here — let egui handle the click first.
                         // Menu closes via close_ctx_menu after egui processes button clicks.
                         if in_terminal && !self.show_context_menu {
