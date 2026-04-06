@@ -1,5 +1,15 @@
 #[cfg(target_os = "linux")]
-mod x11;
+pub mod x11;
+
+#[cfg(target_os = "linux")]
+pub fn x11_backend_new() -> Result<x11::X11Backend, String> {
+    x11::X11Backend::new()
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn x11_backend_new() -> Result<(), String> {
+    Err("Not supported".into())
+}
 
 use thiserror::Error;
 
@@ -29,8 +39,8 @@ pub struct EmbeddedWindow {
     pub parent_window_id: u64,
     pub portal_rect: EmbedRect,
     #[cfg(target_os = "linux")]
-    backend: x11::X11Backend,
-    overlay_mode: bool,
+    pub backend: x11::X11Backend,
+    pub overlay_mode: bool,
 }
 
 impl EmbeddedWindow {

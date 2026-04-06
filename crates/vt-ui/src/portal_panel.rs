@@ -61,6 +61,7 @@ pub enum PortalAction {
     EmbedByName(String),
     EmbedByPid(u32),
     ReleaseEmbed,
+    GrabWindow,
 }
 
 pub struct PortalPanelResult {
@@ -249,6 +250,13 @@ pub fn draw_portal_panel(
                             RichText::new("Release").color(Color32::from_rgb(239, 41, 41)).size(11.0)
                         ).small()).on_hover_text("Release embedded window").clicked() {
                             action = Some(PortalAction::ReleaseEmbed);
+                        }
+                    }
+                    if !has_embedded {
+                        if ui.add(egui::Button::new(
+                            RichText::new("Grab").color(Color32::from_rgb(66, 133, 244)).size(11.0)
+                        ).small()).on_hover_text("Grab any running window into portal").clicked() {
+                            action = Some(PortalAction::GrabWindow);
                         }
                     }
                     if !detected_items.is_empty() && !has_embedded {

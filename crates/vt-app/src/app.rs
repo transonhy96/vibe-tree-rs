@@ -1358,6 +1358,49 @@ impl App {
                 PortalAction::EmbedByPid(pid) => {
                     tracing::info!(pid, "Embed by PID requested");
                 }
+                PortalAction::GrabWindow => {
+                    // Let user click a window to grab
+                    tracing::info!("Grab window: user should click target window");
+                    let parent_id = self.get_native_window_id().unwrap_or(0);
+                    let rect = self.get_portal_rect();
+
+                    // Use xdotool selectwindow
+                    if let Ok(output) = std::process::Command::new("xdotool")
+                        .arg("selectwindow")
+                        .output()
+                    {
+                        let win_id_str = String::from_utf8_lossy(&output.stdout);
+                        if let Ok(win_id) = win_id_str.trim().parse::<u64>() {
+                            let backend = vt_embed::x11_backend_new();
+                            match backend {
+                                Ok(backend) => {
+                                    let parent_pos = backend.get_window_position(parent_id);
+                                    let abs_rect = vt_embed::EmbedRect {
+                                        x: parent_pos.0 + rect.x,
+                                        y: parent_pos.1 + rect.y,
+                                        width: rect.width,
+                                        height: rect.height,
+                                    };
+                                    let _ = backend.set_bounds(win_id, abs_rect);
+                                    let _ = backend.raise_window(win_id);
+
+                                    if let Some(ws) = self.active_ws_mut() {
+                                        ws.embedded_window = Some(vt_embed::EmbeddedWindow {
+                                            child_id: win_id,
+                                            original_parent: 0,
+                                            parent_window_id: parent_id,
+                                            portal_rect: rect,
+                                            backend,
+                                            overlay_mode: true,
+                                        });
+                                    }
+                                    tracing::info!(win_id, "Window grabbed and positioned");
+                                }
+                                Err(e) => tracing::error!("Failed to create X11 backend: {}", e),
+                            }
+                        }
+                    }
+                }
                 PortalAction::ReleaseEmbed => {
                     if let Some(ws) = self.active_ws_mut() {
                         ws.embedded_window.take(); // Drop releases the window

@@ -42,16 +42,34 @@ impl X11Backend {
     }
 
     pub fn find_window_by_name(&self, name: &str) -> Result<u64, EmbedError> {
-        let windows = self.get_all_windows(self.root);
-        for win in windows {
-            if let Some(title) = self.get_window_name(win) {
-                let title_lower = title.to_lowercase();
-                let name_lower = name.to_lowercase();
-                if title_lower.contains(&name_lower) {
-                    return Ok(win as u64);
+        // Use xdotool for reliable window search (handles WM reparenting)
+        let output = std::process::Command::new("xdotool")
+            .args(["search", "--name", &name.to_lowercase()])
+            .output();
+
+        if let Ok(out) = output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if let Some(id_str) = stdout.lines().next() {
+                if let Ok(id) = id_str.trim().parse::<u64>() {
+                    return Ok(id);
                 }
             }
         }
+
+        // Fallback: also try by class
+        let output = std::process::Command::new("xdotool")
+            .args(["search", "--class", &name.to_lowercase()])
+            .output();
+
+        if let Ok(out) = output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if let Some(id_str) = stdout.lines().next() {
+                if let Ok(id) = id_str.trim().parse::<u64>() {
+                    return Ok(id);
+                }
+            }
+        }
+
         Err(EmbedError::Failed(format!("No window with name '{}'", name)))
     }
 
