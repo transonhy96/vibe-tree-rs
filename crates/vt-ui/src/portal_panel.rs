@@ -78,6 +78,8 @@ pub const WHITELISTED_APPS: &[(&str, &str)] = &[
     ("firefox", "Firefox"),
     ("chromium", "Chromium"),
     ("google-chrome", "Chrome"),
+    ("brave", "Brave"),
+    ("brave-browser", "Brave"),
     ("cargo", "Cargo"),
     ("npm", "npm"),
     ("pnpm", "pnpm"),
