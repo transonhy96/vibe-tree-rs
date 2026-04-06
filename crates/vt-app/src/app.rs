@@ -434,8 +434,13 @@ impl App {
         let text = self.clipboard.as_mut()
             .and_then(|cb| cb.get_text().ok());
         if let Some(text) = text {
-            if let Some(terminal) = self.active_terminal() {
-                terminal.write(text.as_bytes());
+            if !text.is_empty() {
+                // Use bracketed paste mode for safe pasting
+                if let Some(terminal) = self.active_terminal() {
+                    terminal.write(b"\x1b[200~"); // begin bracketed paste
+                    terminal.write(text.as_bytes());
+                    terminal.write(b"\x1b[201~"); // end bracketed paste
+                }
             }
         }
     }
