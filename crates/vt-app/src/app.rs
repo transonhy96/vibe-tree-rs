@@ -535,21 +535,17 @@ impl App {
         let name_owned = name.to_string();
         let proxy = self.proxy.clone();
 
-        // Try immediately first
+        // Try to find and embed the window
+        tracing::info!(name, parent_id, "Searching for window to embed");
         match vt_embed::embed_window_by_name(parent_id, name, rect) {
             Ok(embedded) => {
-                tracing::info!(name, "Window embedded successfully");
+                tracing::info!(name, child_id = embedded.child_id, "Window embedded successfully");
                 if let Some(ws) = self.active_ws_mut() {
                     ws.embedded_window = Some(embedded);
                 }
             }
             Err(e) => {
-                tracing::warn!("Window '{}' not found yet: {}. Will retry in 1s...", name, e);
-                // Retry after a delay (app might not have created its window yet)
-                self.rt.spawn(async move {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                    let _ = proxy.send_event(AppEvent::Redraw);
-                });
+                tracing::warn!("Window '{}' not found: {}", name, e);
             }
         }
     }
@@ -601,6 +597,7 @@ impl App {
             }
         }
 
+        let mut auto_embed_name: Option<String> = None;
         // Scan terminal output for detectable items
         {
             let active_path = self.active_ws()
@@ -619,14 +616,25 @@ impl App {
                         if hash != ws.last_scan_hash {
                             ws.last_scan_hash = hash;
                             let new_items = scan_output(&text);
+                            let mut new_app_name: Option<String> = None;
                             for item in new_items {
                                 if !ws.detected_items.iter().any(|d| d.value == item.value) {
+                                    // Check if it's a new app launch for auto-embed
+                                    if let vt_ui::portal_panel::DetectedKind::AppLaunch(ref name) = item.kind {
+                                        if ws.embedded_window.is_none() {
+                                            new_app_name = Some(name.clone());
+                                        }
+                                    }
                                     ws.detected_items.push(item);
                                 }
                             }
-                            // Auto-expand portal when first items detected
+                            // Auto-expand portal when items detected
                             if ws.portal_collapsed && !ws.detected_items.is_empty() {
                                 ws.portal_collapsed = false;
+                            }
+                            // Auto-embed new app if detected
+                            if let Some(app_name) = new_app_name {
+                                auto_embed_name = Some(app_name);
                             }
                             if ws.detected_items.len() > 50 {
                                 ws.detected_items.drain(0..ws.detected_items.len() - 50);
@@ -635,6 +643,19 @@ impl App {
                     }
                 }
             }
+        }
+
+        // Auto-embed detected app (delayed to allow window creation)
+        if let Some(name) = auto_embed_name {
+            let proxy = self.proxy.clone();
+            let name_clone = name.clone();
+            self.rt.spawn(async move {
+                // Wait for the app to create its window
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                let _ = proxy.send_event(AppEvent::Redraw);
+            });
+            // Try immediately too in case window already exists
+            self.try_embed_by_name(&name);
         }
 
         let gpu = match &self.gpu { Some(g) => g, None => return };

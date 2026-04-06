@@ -45,7 +45,9 @@ impl X11Backend {
         let windows = self.get_all_windows(self.root);
         for win in windows {
             if let Some(title) = self.get_window_name(win) {
-                if title.contains(name) {
+                let title_lower = title.to_lowercase();
+                let name_lower = name.to_lowercase();
+                if title_lower.contains(&name_lower) {
                     return Ok(win as u64);
                 }
             }
