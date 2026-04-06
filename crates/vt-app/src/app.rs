@@ -508,15 +508,16 @@ impl App {
         };
         let scale = gpu.window.scale_factor() as f32;
         let win_size = gpu.window.inner_size();
+        // Use at least 40% of window width for embedded apps
+        let min_width = (win_size.width as f32 * 0.4) as u32;
         let pw = (self.portal_width * scale) as u32;
+        let embed_width = pw.max(min_width);
         let header = (80.0 * scale) as u32;
-        // Portal is on the right side, below header
-        // Leave some margin for the portal header (30px)
         let portal_header = (38.0 * scale) as u32;
         EmbedRect {
-            x: (win_size.width.saturating_sub(pw)) as i32,
+            x: (win_size.width.saturating_sub(embed_width)) as i32,
             y: (header + portal_header) as i32,
-            width: pw.saturating_sub(16), // margin
+            width: embed_width.saturating_sub(16),
             height: win_size.height.saturating_sub(header + portal_header + 8),
         }
     }
