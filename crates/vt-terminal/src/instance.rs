@@ -36,6 +36,7 @@ pub struct TerminalInstance {
     pub dirty: bool,
     event_rx: std::sync::mpsc::Receiver<TermEvent>,
     _pty_thread: JoinHandle<()>,
+    selection_start: Arc<FairMutex<Option<(usize, i32)>>>,
 }
 
 impl TerminalInstance {
@@ -86,6 +87,7 @@ impl TerminalInstance {
             dirty: true,
             event_rx,
             _pty_thread: pty_thread,
+            selection_start: Arc::new(FairMutex::new(None)),
         }
     }
 
@@ -138,6 +140,7 @@ impl TerminalInstance {
         let point = Point::new(Line(line), Column(col));
         let mut term = self.term.lock();
         term.selection = Some(Selection::new(SelectionType::Simple, point, Direction::Left));
+        self.selection_start.lock().replace((col, line));
     }
 
     /// Update the selection to extend to the given position.
@@ -145,7 +148,18 @@ impl TerminalInstance {
         let point = Point::new(Line(line), Column(col));
         let mut term = self.term.lock();
         if let Some(ref mut sel) = term.selection {
-            sel.update(point, Direction::Right);
+            // Use Left side when dragging left/up, Right when dragging right/down
+            let start = self.selection_start.lock();
+            let side = if let Some((sc, sl)) = *start {
+                if line < sl || (line == sl && col <= sc) {
+                    Direction::Left
+                } else {
+                    Direction::Right
+                }
+            } else {
+                Direction::Right
+            };
+            sel.update(point, side);
         }
     }
 
