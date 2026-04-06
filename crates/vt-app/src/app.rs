@@ -499,6 +499,26 @@ impl App {
         None
     }
 
+    fn get_portal_rect(&self) -> EmbedRect {
+        let gpu = match &self.gpu {
+            Some(g) => g,
+            None => return EmbedRect { x: 0, y: 0, width: 300, height: 600 },
+        };
+        let scale = gpu.window.scale_factor() as f32;
+        let win_size = gpu.window.inner_size();
+        let pw = (self.portal_width * scale) as u32;
+        let header = (80.0 * scale) as u32;
+        // Portal is on the right side, below header
+        // Leave some margin for the portal header (30px)
+        let portal_header = (38.0 * scale) as u32;
+        EmbedRect {
+            x: (win_size.width.saturating_sub(pw)) as i32,
+            y: (header + portal_header) as i32,
+            width: pw.saturating_sub(16), // margin
+            height: win_size.height.saturating_sub(header + portal_header + 8),
+        }
+    }
+
     fn try_embed_by_name(&mut self, name: &str) {
         let parent_id = match self.get_native_window_id() {
             Some(id) => id,
@@ -508,21 +528,14 @@ impl App {
             }
         };
 
-        // Get portal rect from the portal panel result
-        // Use a reasonable default based on window size
-        let gpu = match &self.gpu {
-            Some(g) => g,
-            None => return,
-        };
-        let win_size = gpu.window.inner_size();
-        let portal_width = 300u32;
-        let rect = EmbedRect {
-            x: (win_size.width - portal_width) as i32,
-            y: 80, // below header
-            width: portal_width,
-            height: win_size.height.saturating_sub(80),
-        };
+        let rect = self.get_portal_rect();
+        tracing::info!(name, ?rect, "Attempting to embed window");
 
+        // Give the app a moment to create its window, then try to find it
+        let name_owned = name.to_string();
+        let proxy = self.proxy.clone();
+
+        // Try immediately first
         match vt_embed::embed_window_by_name(parent_id, name, rect) {
             Ok(embedded) => {
                 tracing::info!(name, "Window embedded successfully");
@@ -531,7 +544,21 @@ impl App {
                 }
             }
             Err(e) => {
-                tracing::error!("Failed to embed window '{}': {}", name, e);
+                tracing::warn!("Window '{}' not found yet: {}. Will retry in 1s...", name, e);
+                // Retry after a delay (app might not have created its window yet)
+                self.rt.spawn(async move {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                    let _ = proxy.send_event(AppEvent::Redraw);
+                });
+            }
+        }
+    }
+
+    fn update_embedded_window_position(&self) {
+        if let Some(ws) = self.active_ws() {
+            if let Some(ref embedded) = ws.embedded_window {
+                let rect = self.get_portal_rect();
+                let _ = embedded.set_bounds(rect);
             }
         }
     }
@@ -558,6 +585,7 @@ impl App {
                 }
             }
         }
+        self.update_embedded_window_position();
     }
 
     fn do_frame(&mut self) {
@@ -1126,6 +1154,7 @@ impl App {
         let new_portal_w = portal_result.as_ref().map(|r| r.panel_width).unwrap_or(0.0);
         if (new_portal_w - self.portal_width).abs() > 1.0 {
             self.portal_width = new_portal_w;
+            self.update_embedded_window_position();
             if let Some((cw, ch)) = self.terminal_renderer.as_ref().map(|r| (r.cell_width, r.cell_height)) {
                 if let Some(gpu) = &self.gpu {
                     let new_size = self.calc_terminal_size(gpu.config.width as f32, gpu.config.height as f32, cw, ch);
