@@ -114,6 +114,15 @@ pub async fn remove_worktree(
     worktree_path: &Path,
     branch_name: &str,
 ) -> Result<WorktreeRemoveResult, GitError> {
+    remove_worktree_ex(project_path, worktree_path, branch_name, true).await
+}
+
+pub async fn remove_worktree_ex(
+    project_path: &Path,
+    worktree_path: &Path,
+    branch_name: &str,
+    delete_branch: bool,
+) -> Result<WorktreeRemoveResult, GitError> {
     let wt_str = worktree_path.to_string_lossy();
     execute_git_command(
         &["worktree", "remove", "--force", &wt_str],
@@ -121,21 +130,33 @@ pub async fn remove_worktree(
     )
     .await?;
 
-    // Try to delete the branch (non-fatal if it fails)
-    let warning = match execute_git_command(
-        &["branch", "-D", branch_name],
-        project_path,
-    )
-    .await
-    {
-        Ok(_) => None,
-        Err(e) => Some(format!("Branch deletion warning: {}", e)),
+    // Optionally delete the branch
+    let warning = if !delete_branch {
+        None
+    } else {
+        match execute_git_command(
+            &["branch", "-D", branch_name],
+            project_path,
+        )
+        .await
+        {
+            Ok(_) => None,
+            Err(e) => Some(format!("Branch deletion warning: {}", e)),
+        }
     };
 
     Ok(WorktreeRemoveResult {
         success: true,
         warning,
     })
+}
+
+/// Initialize a new git repository at the given path.
+pub async fn init_repo(path: &Path) -> Result<(), GitError> {
+    std::fs::create_dir_all(path)
+        .map_err(|e| GitError::Io(e))?;
+    execute_git_command(&["init", "-b", "main"], path).await?;
+    Ok(())
 }
 
 pub async fn get_current_branch(worktree_path: &Path) -> Result<String, GitError> {

@@ -36,7 +36,16 @@ pub struct AppConfig {
     pub recent_projects: Vec<PathBuf>,
     #[serde(default)]
     pub workspace_state: WorkspaceState,
+    /// Remote sync check interval in seconds.
+    #[serde(default = "default_sync_interval")]
+    pub sync_interval_secs: u64,
+    /// Sidebar default width.
+    #[serde(default = "default_sidebar_width")]
+    pub sidebar_width: f32,
 }
+
+fn default_sync_interval() -> u64 { 60 }
+fn default_sidebar_width() -> f32 { 200.0 }
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -45,6 +54,8 @@ impl Default for AppConfig {
             terminal: TerminalSettings::default(),
             recent_projects: Vec::new(),
             workspace_state: WorkspaceState::default(),
+            sync_interval_secs: default_sync_interval(),
+            sidebar_width: default_sidebar_width(),
         }
     }
 }

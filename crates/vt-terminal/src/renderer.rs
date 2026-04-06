@@ -25,7 +25,7 @@ pub struct DetectedUrl {
     pub col_end: usize,
 }
 
-struct CachedLine {
+pub struct CachedLine {
     buffer: GlyphonBuffer,
     x: f32,
     y: f32,
@@ -42,7 +42,7 @@ pub struct TerminalRenderer {
     pub cell_width: f32,
     pub cell_height: f32,
     font_size: f32,
-    cached_lines: Vec<CachedLine>,
+    pub cached_lines: Vec<CachedLine>,
     pub last_content_hash: u64,
     cursor_pos: Option<(f32, f32)>,
     cursor_blink_visible: bool,

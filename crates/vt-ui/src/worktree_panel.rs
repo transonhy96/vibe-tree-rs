@@ -1,6 +1,23 @@
 use egui::{self, Color32, RichText};
 use vt_core::types::Worktree;
 
+/// Codicon icon constants (from VS Code's codicon.ttf)
+pub mod icons {
+    pub const SYNC: &str = "\u{EA77}";        // repo-sync
+    pub const REPO_PULL: &str = "\u{EB40}";   // repo-pull
+    pub const ADD: &str = "\u{EA60}";          // plus
+    pub const CLOSE: &str = "\u{EA76}";        // x
+    pub const CHEVRON_LEFT: &str = "\u{EAB6}"; // collapse left
+    pub const CHEVRON_RIGHT: &str = "\u{EAB7}";// expand right
+    pub const GIT_BRANCH: &str = "\u{EA68}";   // git branch
+    pub const FOLDER: &str = "\u{EA83}";       // folder
+    pub const FILE: &str = "\u{EA7B}";         // file
+    pub const TERMINAL: &str = "\u{EA85}";     // terminal
+    pub const SETTINGS: &str = "\u{EB52}";     // gear
+    pub const SEARCH: &str = "\u{EA6D}";       // search
+    pub const TRASH: &str = "\u{EA81}";        // delete
+}
+
 /// Actions emitted by the worktree panel.
 pub enum WorktreeAction {
     Select(usize),
@@ -41,7 +58,7 @@ pub fn draw_worktree_panel(
             .exact_width(32.0)
             .frame(panel_frame)
             .show(ctx, |ui| {
-                if ui.button(">").on_hover_text("Expand sidebar").clicked() {
+                if ui.button(icons::CHEVRON_RIGHT).on_hover_text("Expand sidebar").clicked() {
                     action = Some(WorktreeAction::ToggleCollapse);
                 }
             });
@@ -54,61 +71,70 @@ pub fn draw_worktree_panel(
         .exact_width(sidebar_width)
         .frame(panel_frame)
         .show(ctx, |ui| {
-            // Drag handle on the RIGHT edge of the sidebar (inside the panel)
-            {
-                let panel_rect = ui.max_rect();
-                let handle_rect = egui::Rect::from_min_max(
-                    egui::pos2(panel_rect.right() - 4.0, panel_rect.top()),
-                    egui::pos2(panel_rect.right(), panel_rect.bottom()),
-                );
-                let handle_resp = ui.interact(handle_rect, egui::Id::new("sidebar_resize_handle"), egui::Sense::drag());
-                if handle_resp.dragged() {
-                    let delta = handle_resp.drag_delta().x;
-                    let new_width = (sidebar_width + delta).clamp(120.0, 400.0);
-                    action = Some(WorktreeAction::ResizeSidebar(new_width));
-                }
-                if handle_resp.hovered() || handle_resp.dragged() {
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
-                }
-            }
+            // No drag handle — sidebar uses collapse/expand toggle button
             // Header row: action buttons only
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Pull/sync button — glows green when remote has updates
+                    // Pull/sync button — animated pulse when remote has updates
                     let pull_color = if has_remote_updates {
-                        Color32::from_rgb(78, 154, 6) // green glow
+                        // Pulsing green animation
+                        let t = ui.ctx().input(|i| i.time);
+                        let pulse = ((t * 3.0).sin() * 0.5 + 0.5) as f32; // 0..1 oscillation
+                        let r = (78.0 + pulse * 60.0) as u8;
+                        let g = (154.0 + pulse * 80.0) as u8;
+                        let b = (6.0 + pulse * 30.0) as u8;
+                        ui.ctx().request_repaint(); // keep animating
+                        Color32::from_rgb(r, g, b)
                     } else {
                         Color32::from_rgb(150, 150, 150)
                     };
-                    let pull_text = if has_remote_updates { "Pull" } else { "Sync" };
                     let pull_tooltip = if has_remote_updates {
                         "Remote has new changes - click to pull"
                     } else {
-                        "Check and pull remote changes"
+                        "Sync with remote (every 60s)"
                     };
+                    let sync_icon = if has_remote_updates { icons::REPO_PULL } else { icons::SYNC };
                     if ui.add(egui::Button::new(
-                        RichText::new(pull_text).color(pull_color).size(11.0)
-                    ).small()).on_hover_text(pull_tooltip).clicked() {
+                        RichText::new(sync_icon).color(pull_color).size(11.0)
+                    ).small().frame(false)).on_hover_text(pull_tooltip).clicked() {
                         if has_remote_updates {
                             action = Some(WorktreeAction::PullRemote);
                         } else {
                             action = Some(WorktreeAction::Refresh);
                         }
                     }
-                    if ui.small_button("+").on_hover_text("New worktree").clicked() {
+                    if ui.add(egui::Button::new(
+                        RichText::new(icons::ADD).size(11.0)
+                    ).small().frame(false)).on_hover_text("New worktree").clicked() {
                         action = Some(WorktreeAction::CreateNew);
-                    }
-                    // Collapse button (leftmost in right-to-left layout)
-                    let collapse_icon = if collapsed { ">" } else { "<" };
-                    if ui.small_button(collapse_icon).on_hover_text("Toggle sidebar").clicked() {
-                        action = Some(WorktreeAction::ToggleCollapse);
                     }
                 });
             });
 
             ui.separator();
 
-            ui.label(RichText::new("Worktrees").size(12.0).color(Color32::GRAY));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Worktrees").size(12.0).color(Color32::GRAY));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let btn = ui.add(
+                        egui::Button::new(icons::CHEVRON_LEFT)
+                            .small()
+                            .sense(egui::Sense::click_and_drag()),
+                    ).on_hover_text("Click to collapse, drag to resize");
+                    if btn.clicked() {
+                        action = Some(WorktreeAction::ToggleCollapse);
+                    }
+                    if btn.dragged() {
+                        let delta = btn.drag_delta().x;
+                        let new_width = (sidebar_width + delta).clamp(120.0, 400.0);
+                        action = Some(WorktreeAction::ResizeSidebar(new_width));
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                    }
+                    if btn.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                    }
+                });
+            });
             ui.add_space(4.0);
 
             egui::ScrollArea::vertical()
@@ -141,7 +167,7 @@ pub fn draw_worktree_panel(
                     ui.horizontal(|ui| {
                         let resp = ui.selectable_label(
                             is_selected,
-                            RichText::new(format!("{} {}", if is_main { "*" } else { "-" }, branch_name))
+                            RichText::new(format!("{} {}", icons::GIT_BRANCH, branch_name))
                                 .color(text_color),
                         );
 
@@ -152,7 +178,7 @@ pub fn draw_worktree_panel(
                         // Delete button on the right (not for main)
                         if !is_main {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.small_button("x").on_hover_text("Delete worktree").clicked() {
+                                if ui.small_button(icons::TRASH).on_hover_text("Delete worktree").clicked() {
                                     action = Some(WorktreeAction::Delete(i));
                                 }
                             });
@@ -162,7 +188,9 @@ pub fn draw_worktree_panel(
             });
         });
 
-    let panel_width = panel_response.response.rect.width();
+    let panel_rect = panel_response.response.rect;
+    let panel_width = panel_rect.width();
+
 
     WorktreePanelResult {
         action,

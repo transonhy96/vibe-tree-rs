@@ -7,11 +7,12 @@ use vt_core::config::AppConfig;
 use vt_core::types::Worktree;
 use vt_terminal::{TerminalInstance, TerminalRenderer};
 use vt_embed::{EmbedRect, EmbeddedWindow};
-use vt_ui::{draw_worktree_panel, draw_portal_panel, scan_output, DetectedItem, ThemeColors, WorktreeAction, WorktreePanelResult, PortalAction, PortalPanelResult};
+use vt_ui::{draw_worktree_panel, draw_portal_panel, icons, scan_output, DetectedItem, ThemeColors, WorktreeAction, WorktreePanelResult, PortalAction, PortalPanelResult};
 
 /// Set to `true` to enable the portal panel (app embedding, output scanning).
 /// Disabled by default — work in progress.
 const PORTAL_ENABLED: bool = false;
+const WINDOW_PADDING: f32 = 5.0;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
@@ -67,6 +68,11 @@ pub struct App {
     show_context_menu: bool,
     context_menu_pos: egui::Pos2,
     clipboard: Option<arboard::Clipboard>,
+    confirm_close_ws: Option<usize>,
+    confirm_delete_wt: Option<usize>,
+    delete_branch_too: bool,
+    show_preferences: bool,
+    window_focused: bool,
 }
 
 impl App {
@@ -107,6 +113,11 @@ impl App {
             show_context_menu: false,
             context_menu_pos: egui::Pos2::ZERO,
             clipboard: arboard::Clipboard::new().ok(),
+            confirm_close_ws: None,
+            confirm_delete_wt: None,
+            delete_branch_too: true,
+            show_preferences: false,
+            window_focused: true,
         }
     }
 
@@ -130,6 +141,21 @@ impl App {
                     self.config.terminal.font_size,
                 );
                 self.theme_colors.apply_to_egui(&self.egui_ctx, self.config.theme);
+
+                // Load icon font (Codicons)
+                let mut fonts = egui::FontDefinitions::default();
+                fonts.font_data.insert(
+                    "codicons".to_owned(),
+                    egui::FontData::from_static(include_bytes!("../assets/codicon.ttf"))
+                        .into(),
+                );
+                // Add codicons as fallback to proportional font
+                fonts.families
+                    .entry(egui::FontFamily::Proportional)
+                    .or_default()
+                    .push("codicons".to_owned());
+                self.egui_ctx.set_fonts(fonts);
+
                 self.egui_state = Some(egui_state);
                 self.egui_renderer = Some(egui_renderer);
                 self.terminal_renderer = Some(terminal_renderer);
@@ -144,6 +170,19 @@ impl App {
         if self.workspaces.iter().any(|w| w.path == path) {
             self.active_workspace_idx = self.workspaces.iter().position(|w| w.path == path);
             return;
+        }
+
+        // If not a git repo, auto-initialize it
+        let is_git = self.rt.block_on(vt_git::is_git_repository(&path));
+        if !is_git {
+            tracing::info!(path = %path.display(), "Not a git repo — initializing");
+            match self.rt.block_on(vt_git::init_repo(&path)) {
+                Ok(()) => tracing::info!("Git repo initialized"),
+                Err(e) => {
+                    tracing::error!("Failed to init git repo: {}", e);
+                    return;
+                }
+            }
         }
 
         let name = path.file_name()
@@ -219,6 +258,11 @@ impl App {
         self.workspaces.remove(idx);
         if self.workspaces.is_empty() {
             self.active_workspace_idx = None;
+            // Clear terminal renderer cache so stale content doesn't persist
+            if let Some(renderer) = &mut self.terminal_renderer {
+                renderer.last_content_hash = 0;
+                renderer.cached_lines.clear();
+            }
         } else {
             self.active_workspace_idx = Some(idx.min(self.workspaces.len() - 1));
         }
@@ -329,8 +373,8 @@ impl App {
         let proxy = self.proxy.clone();
         self.rt.spawn(async move {
             loop {
-                // Wait 5 minutes
-                tokio::time::sleep(tokio::time::Duration::from_secs(300)).await;
+                // Check every 60 seconds
+                tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
                 // Fetch and check
                 let _ = vt_git::fetch(&path).await;
                 if vt_git::has_remote_changes(&path, &branch).await {
@@ -431,9 +475,8 @@ impl App {
     }
 
     fn terminal_left_offset(&self) -> f32 {
-        if self.active_ws().is_none() { return 0.0; }
-        let cell = self.terminal_renderer.as_ref().map(|r| r.cell_width).unwrap_or(10.0);
-        self.sidebar_width + cell
+        if self.active_ws().is_none() { return WINDOW_PADDING; }
+        self.sidebar_width + WINDOW_PADDING
     }
 
     /// Convert pixel position to terminal grid coordinates.
@@ -569,9 +612,9 @@ impl App {
     fn calc_terminal_size(&self, w: f32, h: f32, cw: f32, ch: f32) -> (u16, u16) {
         let header = 80.0_f32;
         let left = self.terminal_left_offset();
-        let right = self.portal_width + 10.0; // portal + scrollbar
+        let right = self.portal_width + 10.0 + WINDOW_PADDING; // portal + scrollbar + padding
         let cols = ((w - left - right).max(cw) / cw).floor() as u16;
-        let rows = ((h - header).max(ch) / ch).floor() as u16;
+        let rows = ((h - header - WINDOW_PADDING).max(ch) / ch).floor() as u16;
         (cols.max(2), rows.max(1))
     }
 
@@ -795,10 +838,34 @@ impl App {
         let mut cancel_dialog = false;
         let mut switch_ws: Option<usize> = None;
         let mut close_ws: Option<usize> = None;
+        let mut confirm_close_yes = false;
+        let mut confirm_close_cancel = false;
+        let confirm_close_ws = self.confirm_close_ws;
+        let mut confirm_delete_yes = false;
+        let mut confirm_delete_cancel = false;
+        let confirm_delete_wt = self.confirm_delete_wt;
+        let mut open_preferences = false;
+        let mut prefs_close = false;
+        let mut prefs_save = false;
+        let mut prefs_reset = false;
+        let mut prefs_theme_toggle = false;
+        let show_preferences = self.show_preferences;
+        let mut delete_branch_too = self.delete_branch_too;
+        let config_theme = self.config.theme;
+        let config_font_size = self.config.terminal.font_size;
+        let config_sync_interval = self.config.sync_interval_secs;
+        let mut prefs_font_size = self.config.terminal.font_size;
+        let mut prefs_sync_interval = self.config.sync_interval_secs;
+        let mut prefs_scrollback = self.config.terminal.scrollback;
+        let mut prefs_sidebar_width = self.config.sidebar_width;
 
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
-            let panel_frame = egui::Frame::new().fill(egui::Color32::from_rgb(30, 30, 30));
-            let tab_frame = egui::Frame::new().fill(egui::Color32::from_rgb(24, 24, 24));
+            let panel_frame = egui::Frame::new()
+                .fill(egui::Color32::from_rgb(30, 30, 30))
+                .outer_margin(egui::Margin { left: WINDOW_PADDING as i8, right: WINDOW_PADDING as i8, top: WINDOW_PADDING as i8, bottom: 0 });
+            let tab_frame = egui::Frame::new()
+                .fill(egui::Color32::from_rgb(24, 24, 24))
+                .outer_margin(egui::Margin { left: WINDOW_PADDING as i8, right: WINDOW_PADDING as i8, top: 0, bottom: 0 });
 
             // Menu + header bar (top-most)
             egui::TopBottomPanel::top("header")
@@ -814,6 +881,10 @@ impl App {
                             ui.menu_button("File", |ui| {
                                 if ui.button("Open Project...").clicked() {
                                     open_project = true;
+                                    ui.close_menu();
+                                }
+                                if ui.button("Preferences...").clicked() {
+                                    open_preferences = true;
                                     ui.close_menu();
                                 }
                                 ui.separator();
@@ -851,19 +922,29 @@ impl App {
                             } else {
                                 egui::Color32::from_rgb(150, 150, 150)
                             };
+                            let x_color = egui::Color32::from_rgb(120, 120, 120);
 
-                            ui.horizontal(|ui| {
-                                let resp = ui.selectable_label(
-                                    is_active,
-                                    egui::RichText::new(name).color(text_color),
-                                );
-                                if resp.clicked() {
+                            let resp = ui.selectable_label(
+                                is_active,
+                                egui::RichText::new(format!("{}    x", name)).color(text_color),
+                            );
+
+                            // Click on the label area → switch workspace
+                            // But if click is on the last 2 chars ("x") → close
+                            if resp.clicked() {
+                                // Check if pointer is on the right side (the "x" area)
+                                let pointer = ui.input(|i| i.pointer.interact_pos());
+                                let x_threshold = resp.rect.right() - 18.0;
+                                if let Some(pos) = pointer {
+                                    if pos.x > x_threshold {
+                                        close_ws = Some(i);
+                                    } else {
+                                        switch_ws = Some(i);
+                                    }
+                                } else {
                                     switch_ws = Some(i);
                                 }
-                                if ui.small_button("x").clicked() {
-                                    close_ws = Some(i);
-                                }
-                            });
+                            }
                             ui.separator();
                         }
 
@@ -1083,6 +1164,129 @@ impl App {
                 }
             }
 
+            // Close workspace confirmation dialog
+            if let Some(idx) = confirm_close_ws {
+                let ws_name = ws_names.get(idx).cloned().unwrap_or_default();
+                egui::Window::new("Close Workspace?")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.label(format!("Close workspace \"{}\"?", ws_name));
+                        ui.label("All terminal sessions will be terminated.");
+                        ui.add_space(12.0);
+                        ui.horizontal(|ui| {
+                            if ui.button(
+                                egui::RichText::new("  Close  ")
+                                    .color(egui::Color32::from_rgb(239, 41, 41))
+                            ).clicked() {
+                                confirm_close_yes = true;
+                            }
+                            ui.add_space(8.0);
+                            if ui.button("Cancel").clicked() {
+                                confirm_close_cancel = true;
+                            }
+                        });
+                    });
+            }
+
+            // Delete worktree confirmation dialog
+            if let Some(idx) = confirm_delete_wt {
+                let wt_name = worktrees.get(idx)
+                    .and_then(|w| w.branch.as_deref())
+                    .unwrap_or("unknown");
+                egui::Window::new("Delete Worktree?")
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.label(format!("Delete worktree \"{}\"?", wt_name));
+                        ui.label("This will remove the worktree directory.");
+                        ui.add_space(8.0);
+                        ui.checkbox(&mut delete_branch_too, "Also delete the branch");
+                        ui.add_space(12.0);
+                        ui.horizontal(|ui| {
+                            if ui.button(
+                                egui::RichText::new("  Delete  ")
+                                    .color(egui::Color32::from_rgb(239, 41, 41))
+                            ).clicked() {
+                                confirm_delete_yes = true;
+                            }
+                            ui.add_space(8.0);
+                            if ui.button("Cancel").clicked() {
+                                confirm_delete_cancel = true;
+                            }
+                        });
+                    });
+            }
+
+            // Preferences window
+            if show_preferences {
+                let mut is_open = true;
+                egui::Window::new(format!("{} Preferences", icons::SETTINGS))
+                    .open(&mut is_open)
+                    .collapsible(false)
+                    .resizable(true)
+                    .default_width(400.0)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        egui::Grid::new("prefs_grid")
+                            .num_columns(2)
+                            .spacing([20.0, 8.0])
+                            .show(ui, |ui| {
+                                // Theme
+                                ui.label("Theme:");
+                                let current_theme = if config_theme == vt_core::types::Theme::Dark { "Dark" } else { "Light" };
+                                if ui.button(current_theme).on_hover_text("Click to toggle").clicked() {
+                                    prefs_theme_toggle = true;
+                                }
+                                ui.end_row();
+
+                                // Font size
+                                ui.label("Font size:");
+                                ui.add(egui::DragValue::new(&mut prefs_font_size).range(8.0..=32.0).speed(0.5).suffix(" px"));
+                                ui.end_row();
+
+                                // Sync interval
+                                ui.label("Sync interval:");
+                                ui.add(egui::DragValue::new(&mut prefs_sync_interval).range(10..=600).speed(1.0).suffix(" sec"));
+                                ui.end_row();
+
+                                // Scrollback
+                                ui.label("Scrollback lines:");
+                                ui.add(egui::DragValue::new(&mut prefs_scrollback).range(100..=100000).speed(100.0));
+                                ui.end_row();
+
+                                // Sidebar width
+                                ui.label("Sidebar width:");
+                                ui.add(egui::DragValue::new(&mut prefs_sidebar_width).range(120.0..=400.0).speed(1.0).suffix(" px"));
+                                ui.end_row();
+                            });
+
+                        ui.add_space(16.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("  Save  ").clicked() {
+                                prefs_save = true;
+                            }
+                            ui.add_space(8.0);
+                            if ui.button("Reset to defaults").clicked() {
+                                prefs_reset = true;
+                            }
+                        });
+
+                        if prefs_font_size != config_font_size || prefs_sync_interval != config_sync_interval {
+                            ui.add_space(8.0);
+                            ui.colored_label(
+                                egui::Color32::from_rgb(200, 180, 60),
+                                "Some changes require restart to take effect.",
+                            );
+                        }
+                    });
+                if !is_open {
+                    prefs_close = true;
+                }
+            }
+
             // Right-click context menu (positioned at cursor)
             if show_ctx_menu {
                 egui::Area::new(egui::Id::new("terminal_context_menu"))
@@ -1117,8 +1321,18 @@ impl App {
         self.open_project_path = project_path_input;
 
         // Handle egui output
+        let mut platform_output = full_output.platform_output;
+        // When a dialog is open, force pointer cursor unless egui specifically wants something else
+        let any_dialog = self.show_new_branch_dialog || self.show_open_project_dialog || self.confirm_close_ws.is_some() || self.confirm_delete_wt.is_some() || self.show_preferences;
+        if any_dialog {
+            match platform_output.cursor_icon {
+                egui::CursorIcon::Text => platform_output.cursor_icon = egui::CursorIcon::Default,
+                egui::CursorIcon::None => platform_output.cursor_icon = egui::CursorIcon::Default,
+                _ => {} // keep PointingHand, ResizeColumn, etc.
+            }
+        }
         self.egui_state.as_mut().unwrap()
-            .handle_platform_output(&gpu.window, full_output.platform_output);
+            .handle_platform_output(&gpu.window, platform_output);
         let paint_jobs = self.egui_ctx.tessellate(full_output.shapes, full_output.pixels_per_point);
         let screen_descriptor = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [gpu.config.width, gpu.config.height],
@@ -1126,9 +1340,13 @@ impl App {
         };
 
         // Update sidebar width from panel result and resize terminal if needed
+        // Don't overwrite saved width when sidebar is collapsed (panel_width=32)
+        let sidebar_is_collapsed = self.active_ws().map(|ws| ws.sidebar_collapsed).unwrap_or(false);
         if let Some(ref result) = wt_result {
             let old_width = self.sidebar_width;
-            self.sidebar_width = result.panel_width;
+            if !sidebar_is_collapsed {
+                self.sidebar_width = result.panel_width;
+            }
             if (old_width - result.panel_width).abs() > 1.0 {
                 // Sidebar resized — recalculate terminal cols
                 if let Some((cw, ch)) = self.terminal_renderer.as_ref()
@@ -1224,16 +1442,16 @@ impl App {
         }
 
         // Set cursor based on area and egui state
+        let any_dialog_open = self.show_new_branch_dialog || self.show_open_project_dialog || self.confirm_close_ws.is_some() || self.confirm_delete_wt.is_some() || self.show_preferences;
         if let Some(gpu) = &self.gpu {
             let (mx, my) = self.last_mouse_pos;
             let egui_cursor = self.egui_ctx.output(|o| o.cursor_icon);
-            if self.is_in_terminal_area(mx, my) && !self.show_context_menu
-                && egui_cursor == egui::CursorIcon::Default
-            {
-                gpu.window.set_cursor(winit::window::Cursor::Icon(winit::window::CursorIcon::Text));
-            } else {
-                // Map egui cursor to winit cursor
-                let winit_cursor = match egui_cursor {
+            let in_terminal = self.is_in_terminal_area(mx, my);
+            // Use egui's cursor if it set something specific (not Default)
+            // Otherwise: Text cursor in terminal area, Pointer elsewhere (for buttons etc.)
+            let winit_cursor = if egui_cursor != egui::CursorIcon::Default {
+                // egui explicitly set a cursor (text edit, resize, etc.)
+                match egui_cursor {
                     egui::CursorIcon::PointingHand => winit::window::CursorIcon::Pointer,
                     egui::CursorIcon::Text => winit::window::CursorIcon::Text,
                     egui::CursorIcon::ResizeColumn => winit::window::CursorIcon::ColResize,
@@ -1241,9 +1459,16 @@ impl App {
                     egui::CursorIcon::Grab => winit::window::CursorIcon::Grab,
                     egui::CursorIcon::Grabbing => winit::window::CursorIcon::Grabbing,
                     _ => winit::window::CursorIcon::Default,
-                };
-                gpu.window.set_cursor(winit::window::Cursor::Icon(winit_cursor));
-            }
+                }
+            } else if in_terminal && !any_dialog_open && !self.show_context_menu {
+                winit::window::CursorIcon::Text
+            } else if self.egui_ctx.is_using_pointer() || self.egui_ctx.is_pointer_over_area() {
+                // Mouse is over an egui widget (button, panel, etc.) — use pointer
+                winit::window::CursorIcon::Pointer
+            } else {
+                winit::window::CursorIcon::Default
+            };
+            gpu.window.set_cursor(winit::window::Cursor::Icon(winit_cursor));
         }
 
         // Process deferred actions
@@ -1262,7 +1487,89 @@ impl App {
             self.active_workspace_idx = Some(idx);
             self.save_state();
         }
-        if let Some(idx) = close_ws { self.close_workspace(idx); }
+        if let Some(idx) = close_ws {
+            self.confirm_close_ws = Some(idx);
+        }
+        if confirm_close_yes {
+            if let Some(idx) = self.confirm_close_ws.take() {
+                self.close_workspace(idx);
+            }
+        }
+        if confirm_close_cancel {
+            self.confirm_close_ws = None;
+        }
+        if confirm_delete_yes {
+            if let Some(idx) = self.confirm_delete_wt.take() {
+                if let Some(ws) = self.active_ws_mut() {
+                    if idx < ws.worktrees.len() {
+                        let wt = ws.worktrees[idx].clone();
+                        let branch = wt.branch.clone().unwrap_or_default();
+                        let wt_path = wt.path.clone();
+                        let project_path = ws.path.clone();
+                        ws.terminals.remove(&wt_path);
+                        let do_delete_branch = self.delete_branch_too;
+                        match self.rt.block_on(
+                            vt_git::remove_worktree_ex(&project_path, &wt_path, &branch, do_delete_branch)
+                        ) {
+                            Ok(result) => {
+                                tracing::info!("Worktree deleted: {:?}", result);
+                            }
+                            Err(e) => tracing::error!("Delete worktree failed: {}", e),
+                        }
+                        self.refresh_worktrees();
+                        if let Some(ws) = self.active_ws_mut() {
+                            if ws.selected_worktree_idx == Some(idx) {
+                                ws.selected_worktree_idx = if ws.worktrees.is_empty() { None } else { Some(0) };
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if confirm_delete_cancel {
+            self.confirm_delete_wt = None;
+        }
+        self.delete_branch_too = delete_branch_too;
+        if open_preferences {
+            self.show_preferences = true;
+        }
+        if prefs_close {
+            self.show_preferences = false;
+        }
+        if prefs_save {
+            self.config.terminal.font_size = prefs_font_size;
+            self.config.sync_interval_secs = prefs_sync_interval;
+            self.config.terminal.scrollback = prefs_scrollback;
+            self.config.sidebar_width = prefs_sidebar_width;
+            self.sidebar_width = prefs_sidebar_width;
+            if let Err(e) = self.config.save() {
+                tracing::error!("Failed to save config: {}", e);
+            } else {
+                tracing::info!("Preferences saved");
+            }
+            self.show_preferences = false;
+        }
+        if prefs_reset {
+            self.config.terminal = vt_core::config::TerminalSettings::default();
+            self.config.sync_interval_secs = 60;
+            self.config.sidebar_width = 200.0;
+            self.sidebar_width = 200.0;
+            if let Err(e) = self.config.save() {
+                tracing::error!("Failed to save config: {}", e);
+            }
+            self.show_preferences = false;
+        }
+        if prefs_theme_toggle {
+            self.config.theme = match self.config.theme {
+                vt_core::types::Theme::Dark => vt_core::types::Theme::Light,
+                vt_core::types::Theme::Light => vt_core::types::Theme::Dark,
+            };
+            self.theme_colors = ThemeColors::from_theme(self.config.theme);
+            self.theme_colors.apply_to_egui(&self.egui_ctx, self.config.theme);
+            if let Err(e) = self.config.save() {
+                tracing::error!("Failed to save config: {}", e);
+            }
+        }
         if let Some(action) = wt_result.and_then(|r| r.action) {
             match action {
                 WorktreeAction::Select(idx) => self.select_worktree(idx),
@@ -1271,7 +1578,9 @@ impl App {
                     self.show_new_branch_dialog = true;
                     self.new_branch_name.clear();
                 }
-                WorktreeAction::Delete(_) => tracing::info!("Delete worktree requested"),
+                WorktreeAction::Delete(idx) => {
+                    self.confirm_delete_wt = Some(idx);
+                }
                 WorktreeAction::PullRemote => self.pull_remote(),
                 WorktreeAction::ResizeSidebar(new_width) => {
                     self.sidebar_width = new_width;
@@ -1464,9 +1773,15 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _window_id: WindowId, event: WindowEvent) {
-        // Handle mouse events for terminal BEFORE egui gets them
+        // Block terminal mouse interaction when a dialog is open
+        let has_dialog = self.show_new_branch_dialog || self.show_open_project_dialog || self.confirm_close_ws.is_some() || self.confirm_delete_wt.is_some() || self.show_preferences || self.show_context_menu;
+
+        // Handle mouse events for terminal BEFORE egui gets them (only when focused)
         match &event {
-            WindowEvent::MouseInput { state, button, .. } => {
+            WindowEvent::Focused(focused) => {
+                self.window_focused = *focused;
+            }
+            WindowEvent::MouseInput { state, button, .. } if !has_dialog && self.window_focused => {
                 use winit::event::MouseButton;
                 if *button == MouseButton::Left {
                     let (mx, my) = self.last_mouse_pos;
@@ -1521,8 +1836,8 @@ impl ApplicationHandler<AppEvent> for App {
                 let y = position.y as f32 / scale;
                 self.last_mouse_pos = (x, y);
                 self.last_mouse_cell = self.pixel_to_cell(x, y);
-                // Cursor is set after egui frame in do_frame
-                if self.mouse_selecting {
+                // Don't update selection when dialog is open
+                if self.mouse_selecting && !has_dialog {
                     if let Some((col, line)) = self.last_mouse_cell {
                         if let Some(terminal) = self.active_terminal() {
                             terminal.update_selection(col, line);
@@ -1569,7 +1884,7 @@ impl ApplicationHandler<AppEvent> for App {
         if let Some(egui_state) = &mut self.egui_state {
             if let Some(gpu) = &self.gpu {
                 let response = egui_state.on_window_event(&gpu.window, &event);
-                let egui_needs_kb = self.show_new_branch_dialog || self.show_open_project_dialog;
+                let egui_needs_kb = self.show_new_branch_dialog || self.show_open_project_dialog || self.confirm_close_ws.is_some() || self.confirm_delete_wt.is_some() || self.show_preferences;
                 if response.repaint {
                     gpu.window.request_redraw();
                 }
@@ -1597,9 +1912,12 @@ impl ApplicationHandler<AppEvent> for App {
                     event_loop.exit();
                 }
             }
+            WindowEvent::Focused(focused) => {
+                self.window_focused = focused;
+            }
             WindowEvent::KeyboardInput {
                 event: KeyEvent { state: ElementState::Pressed, ref logical_key, ref text, .. }, ..
-            } => {
+            } if self.window_focused => {
                 if let Some(terminal) = self.active_terminal() {
                     let modifiers = self.egui_ctx.input(|i| i.modifiers);
                     let ctrl = modifiers.ctrl;
