@@ -228,124 +228,67 @@ impl TerminalRenderer {
 
         drop(term);
 
-        // Rebuild when content changed, or always when scrolled (live section updates independently)
-        let needs_rebuild = content_hash != self.last_content_hash || is_scrolled;
+        // Rebuild when content changed
+        let needs_rebuild = content_hash != self.last_content_hash;
         if needs_rebuild {
             self.last_content_hash = content_hash;
 
-            let available_height = screen_height as f32 - offset_y;
+            // Simple positioning: each row_data entry has a grid line index.
+            // Map grid line to screen Y using: y = offset_y + (line + screen_lines - 1) * cell_height
+            // But skip lines that would be off-screen.
+            // When not scrolled AND content doesn't fill screen, shift up so first content starts at top.
+            let first_content_line = row_data.iter()
+                .find(|(_, text, _)| text.chars().any(|c| !c.is_whitespace() && c != '\0'))
+                .map(|(l, _, _)| *l)
+                .unwrap_or(0);
+            let last_content_line = row_data.last().map(|(l, _, _)| *l).unwrap_or(0);
+            let content_span = (last_content_line - first_content_line + 1) as f32;
+            let available_rows = ((screen_height as f32 - offset_y) / self.cell_height).floor();
 
-            if is_scrolled {
-                // Split view: scrollback at top, divider, live at bottom.
-                // All positioned sequentially from offset_y using simple row counting.
-                let actual_live = live_line_count.min(screen_lines * 2 / 3).max(2);
-                let scrollback_display_rows = screen_lines - actual_live - 1;
-
-                // Scrollback: render row_data lines sequentially from top.
-                // Use y_shift to place first content line at offset_y.
-                let first_content_line = row_data.iter()
-                    .find(|(_, text, _)| text.chars().any(|c| !c.is_whitespace() && c != '\0'))
-                    .map(|(l, _, _)| *l)
-                    .unwrap_or(-(screen_lines as i32 - 1));
-                let content_row = (first_content_line + screen_lines as i32 - 1) as f32;
-                let y_shift = -content_row * self.cell_height;
-                self.rebuild_lines_with_shift(
-                    &row_data, screen_lines, screen_width, offset_x, offset_y,
-                    scrollback_display_rows, y_shift,
-                );
-
-                // Divider
-                let divider_y = offset_y + scrollback_display_rows as f32 * self.cell_height;
-                let metrics = Metrics::new(self.font_size, self.cell_height);
-                let label = " LIVE ";
-                let side_len = cols.saturating_sub(label.len()) / 2;
-                let divider_text = format!(
-                    "{}{}{}",
-                    "-".repeat(side_len),
-                    label,
-                    "-".repeat(cols.saturating_sub(side_len + label.len()))
-                );
-                let mut div_buf = GlyphonBuffer::new(&mut self.font_system, metrics);
-                div_buf.set_size(&mut self.font_system, Some(screen_width as f32), None);
-                div_buf.set_text(
-                    &mut self.font_system, &divider_text,
-                    Attrs::new().family(Family::Monospace).color(GlyphonColor::rgb(100, 100, 100)),
-                    Shaping::Basic,
-                );
-                div_buf.shape_until_scroll(&mut self.font_system, false);
-                self.divider_buffer = Some(CachedLine {
-                    buffer: div_buf, x: offset_x, y: divider_y,
-                    color: GlyphonColor::rgb(100, 100, 100),
-                });
-
-                // Live section: placed right after divider
-                let live_start_y = divider_y + self.cell_height;
-                let live_metrics = Metrics::new(self.font_size, self.cell_height);
-                for (i, (_, text, color)) in live_rows.iter().enumerate() {
-                    if i >= actual_live { break; }
-                    let has_content = text.chars().any(|c| !c.is_whitespace() && c != '\0');
-                    if !has_content { continue; }
-                    let y = live_start_y + i as f32 * self.cell_height;
-                    let mut buf = GlyphonBuffer::new(&mut self.font_system, live_metrics);
-                    buf.set_size(&mut self.font_system, Some(screen_width as f32), None);
-                    buf.set_text(
-                        &mut self.font_system, text,
-                        Attrs::new().family(Family::Monospace).color(*color),
-                        Shaping::Basic,
-                    );
-                    buf.shape_until_scroll(&mut self.font_system, false);
-                    self.cached_lines.push(CachedLine {
-                        buffer: buf, x: offset_x, y, color: *color,
-                    });
-                }
+            let y_base = if !is_scrolled && content_span < available_rows {
+                // Content doesn't fill screen — position from top
+                offset_y - first_content_line as f32 * self.cell_height
             } else {
-                // Normal view: no split
-                self.divider_buffer = None;
+                // Full screen or scrolled — absolute grid positions
+                offset_y + screen_lines as f32 * self.cell_height
+            };
 
-                // Find first non-empty line to shift content up when screen isn't full
-                let first_content_line = row_data.iter()
-                    .find(|(_, text, _)| text.chars().any(|c| !c.is_whitespace() && c != '\0'))
-                    .map(|(l, _, _)| *l)
-                    .unwrap_or(0);
-                // Shift so first content line appears at top
-                // first_content_line's absolute row = first_content_line + screen_lines - 1
-                // We want that row at y=offset_y, so shift = -(row) * cell_height
-                let content_row = (first_content_line + screen_lines as i32 - 1) as f32;
-                let y_shift = -content_row * self.cell_height;
+            self.cached_lines.clear();
+            let metrics = Metrics::new(self.font_size, self.cell_height);
 
-                self.rebuild_lines_with_shift(
-                    &row_data,
-                    screen_lines,
-                    screen_width,
-                    offset_x,
-                    offset_y,
-                    screen_lines,
-                    y_shift,
-                );
+            for (line, text, color) in &row_data {
+                let y = y_base + *line as f32 * self.cell_height;
+                // Skip off-screen lines
+                if y + self.cell_height < offset_y || y > screen_height as f32 {
+                    continue;
+                }
+
+                let mut buf = GlyphonBuffer::new(&mut self.font_system, metrics);
+                buf.set_size(&mut self.font_system, Some(screen_width as f32), None);
+                buf.set_text(&mut self.font_system, text,
+                    Attrs::new().family(Family::Monospace).color(*color), Shaping::Basic);
+                buf.shape_until_scroll(&mut self.font_system, false);
+
+                self.cached_lines.push(CachedLine { buffer: buf, x: offset_x, y, color: *color });
             }
 
-            // Cursor
+            // Also render live rows if scrolled
+            if is_scrolled {
+                let live_y_start = screen_height as f32 - live_rows.len() as f32 * self.cell_height;
+                for (i, (_, text, color)) in live_rows.iter().enumerate() {
+                    let y = live_y_start + i as f32 * self.cell_height;
+                    let mut buf = GlyphonBuffer::new(&mut self.font_system, metrics);
+                    buf.set_size(&mut self.font_system, Some(screen_width as f32), None);
+                    buf.set_text(&mut self.font_system, text,
+                        Attrs::new().family(Family::Monospace).color(*color), Shaping::Basic);
+                    buf.shape_until_scroll(&mut self.font_system, false);
+                    self.cached_lines.push(CachedLine { buffer: buf, x: offset_x, y, color: *color });
+                }
+            }
+
+            // Cursor position uses same y_base
             let cx = offset_x + cursor_col as f32 * self.cell_width;
-            let cy = if is_scrolled {
-                // Cursor in live section
-                let actual_live = live_line_count.min(screen_lines * 2 / 3).max(2);
-                let scrollback_display_rows = screen_lines - actual_live - 1;
-                let divider_y = offset_y + scrollback_display_rows as f32 * self.cell_height;
-                let live_start_y = divider_y + self.cell_height;
-                // cursor_line: 0=bottom (last live row), -(n-1)=top
-                let row_in_live = (cursor_line + actual_live as i32 - 1).max(0) as f32;
-                live_start_y + row_in_live * self.cell_height
-            } else {
-                // Normal: use same shift as rebuild
-                let first_content_line = row_data.iter()
-                    .find(|(_, text, _)| text.chars().any(|c| !c.is_whitespace() && c != '\0'))
-                    .map(|(l, _, _)| *l)
-                    .unwrap_or(0);
-                let content_row = (first_content_line + screen_lines as i32 - 1) as f32;
-                let y_shift = -content_row * self.cell_height;
-                let row = (cursor_line + screen_lines as i32 - 1) as f32;
-                offset_y + row * self.cell_height + y_shift
-            };
+            let cy = y_base + cursor_line as f32 * self.cell_height;
             self.cursor_pos = Some((cx, cy));
 
             let show_cursor = self.cursor_blink_visible;
