@@ -392,6 +392,13 @@ impl App {
     }
 
     /// Gap between sidebar and terminal content (1 cell width).
+    /// Check if pixel position is in the terminal area (not sidebar/header).
+    fn is_in_terminal_area(&self, x: f32, y: f32) -> bool {
+        let left = self.terminal_left_offset();
+        let header = 80.0;
+        x >= left && y >= header
+    }
+
     fn terminal_left_offset(&self) -> f32 {
         if self.active_ws().is_none() { return 0.0; }
         let cell = self.terminal_renderer.as_ref().map(|r| r.cell_width).unwrap_or(10.0);
@@ -1136,13 +1143,16 @@ impl ApplicationHandler<AppEvent> for App {
             WindowEvent::MouseInput { state, button, .. } => {
                 use winit::event::MouseButton;
                 if *button == MouseButton::Left {
+                    let (mx, my) = self.last_mouse_pos;
+                    let in_terminal = self.is_in_terminal_area(mx, my);
                     if *state == ElementState::Pressed {
-                        self.mouse_selecting = true;
                         self.show_context_menu = false;
-                        if let Some((col, line)) = self.last_mouse_cell {
-                            tracing::debug!(col, line, "Selection start");
-                            if let Some(terminal) = self.active_terminal() {
-                                terminal.start_selection(col, line);
+                        if in_terminal {
+                            self.mouse_selecting = true;
+                            if let Some((col, line)) = self.last_mouse_cell {
+                                if let Some(terminal) = self.active_terminal() {
+                                    terminal.start_selection(col, line);
+                                }
                             }
                         }
                     } else {
@@ -1150,7 +1160,9 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                     if let Some(gpu) = &self.gpu { gpu.window.request_redraw(); }
                 }
-                if *button == MouseButton::Right && *state == ElementState::Pressed {
+                if *button == MouseButton::Right && *state == ElementState::Pressed
+                    && self.is_in_terminal_area(self.last_mouse_pos.0, self.last_mouse_pos.1)
+                {
                     self.show_context_menu = true;
                     if let Some(gpu) = &self.gpu {
                         let scale = gpu.window.scale_factor() as f32;

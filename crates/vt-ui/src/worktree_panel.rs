@@ -62,13 +62,10 @@ pub fn draw_worktree_panel(
                     egui::pos2(panel_rect.right(), panel_rect.bottom()),
                 );
                 let handle_resp = ui.interact(handle_rect, egui::Id::new("sidebar_resize_handle"), egui::Sense::drag());
-                // Visual: thin line
-                let handle_color = if handle_resp.hovered() || handle_resp.dragged() {
-                    Color32::from_rgb(100, 100, 120)
-                } else {
-                    Color32::from_rgb(60, 60, 65)
-                };
-                ui.painter().rect_filled(handle_rect, 0.0, handle_color);
+                // Only show visual on hover/drag
+                if handle_resp.hovered() || handle_resp.dragged() {
+                    ui.painter().rect_filled(handle_rect, 0.0, Color32::from_rgb(100, 100, 120));
+                }
 
                 if handle_resp.dragged() {
                     let delta = handle_resp.drag_delta().x;
@@ -119,7 +116,9 @@ pub fn draw_worktree_panel(
             ui.label(RichText::new("Worktrees").size(12.0).color(Color32::GRAY));
             ui.add_space(4.0);
 
-            egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .show(ui, |ui| {
                 for (i, wt) in worktrees.iter().enumerate() {
                     let is_selected = selected_idx == Some(i);
                     let branch_name = wt
