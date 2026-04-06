@@ -62,11 +62,6 @@ pub fn draw_worktree_panel(
                     egui::pos2(panel_rect.right(), panel_rect.bottom()),
                 );
                 let handle_resp = ui.interact(handle_rect, egui::Id::new("sidebar_resize_handle"), egui::Sense::drag());
-                // Only show visual on hover/drag
-                if handle_resp.hovered() || handle_resp.dragged() {
-                    ui.painter().rect_filled(handle_rect, 0.0, Color32::from_rgb(100, 100, 120));
-                }
-
                 if handle_resp.dragged() {
                     let delta = handle_resp.drag_delta().x;
                     let new_width = (sidebar_width + delta).clamp(120.0, 400.0);

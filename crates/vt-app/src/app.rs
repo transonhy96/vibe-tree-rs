@@ -1022,6 +1022,24 @@ impl App {
                 WorktreeAction::PullRemote => self.pull_remote(),
                 WorktreeAction::ResizeSidebar(new_width) => {
                     self.sidebar_width = new_width;
+                    // Resize terminal to fit new layout
+                    if let Some((cw, ch)) = self.terminal_renderer.as_ref()
+                        .map(|r| (r.cell_width, r.cell_height))
+                    {
+                        if let Some(gpu) = &self.gpu {
+                            let new_size = self.calc_terminal_size(
+                                gpu.config.width as f32, gpu.config.height as f32, cw, ch,
+                            );
+                            if new_size != self.terminal_size {
+                                self.terminal_size = new_size;
+                                for ws in &mut self.workspaces {
+                                    for t in ws.terminals.values_mut() {
+                                        t.resize(new_size.0, new_size.1);
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 WorktreeAction::ToggleCollapse => {
                     if let Some(ws) = self.active_ws_mut() {
