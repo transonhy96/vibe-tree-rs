@@ -9,6 +9,7 @@ pub enum WorktreeAction {
     Refresh,
     PullRemote,
     ToggleCollapse,
+    ResizeSidebar(f32),
 }
 
 /// Result from drawing the worktree panel.
@@ -25,6 +26,7 @@ pub fn draw_worktree_panel(
     project_name: &str,
     has_remote_updates: bool,
     collapsed: bool,
+    sidebar_width: f32,
 ) -> WorktreePanelResult {
     let mut action = None;
 
@@ -49,9 +51,34 @@ pub fn draw_worktree_panel(
 
     let panel_response = egui::SidePanel::left("worktree_panel")
         .resizable(false)
-        .exact_width(200.0)
+        .exact_width(sidebar_width)
         .frame(panel_frame)
         .show(ctx, |ui| {
+            // Drag handle on the RIGHT edge of the sidebar (inside the panel)
+            {
+                let panel_rect = ui.max_rect();
+                let handle_rect = egui::Rect::from_min_max(
+                    egui::pos2(panel_rect.right() - 4.0, panel_rect.top()),
+                    egui::pos2(panel_rect.right(), panel_rect.bottom()),
+                );
+                let handle_resp = ui.interact(handle_rect, egui::Id::new("sidebar_resize_handle"), egui::Sense::drag());
+                // Visual: thin line
+                let handle_color = if handle_resp.hovered() || handle_resp.dragged() {
+                    Color32::from_rgb(100, 100, 120)
+                } else {
+                    Color32::from_rgb(60, 60, 65)
+                };
+                ui.painter().rect_filled(handle_rect, 0.0, handle_color);
+
+                if handle_resp.dragged() {
+                    let delta = handle_resp.drag_delta().x;
+                    let new_width = (sidebar_width + delta).clamp(120.0, 400.0);
+                    action = Some(WorktreeAction::ResizeSidebar(new_width));
+                }
+                if handle_resp.hovered() || handle_resp.dragged() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeColumn);
+                }
+            }
             // Header row: action buttons only
             ui.horizontal(|ui| {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

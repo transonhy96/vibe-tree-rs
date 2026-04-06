@@ -732,7 +732,7 @@ impl App {
 
             // Worktree sidebar (only when workspace is open)
             if has_workspace {
-                wt_result = Some(draw_worktree_panel(ctx, &worktrees, selected_wt_idx, &project_name, has_remote_updates, sidebar_collapsed));
+                wt_result = Some(draw_worktree_panel(ctx, &worktrees, selected_wt_idx, &project_name, has_remote_updates, sidebar_collapsed, self.sidebar_width));
             }
 
             // Portal panel (right side, only when workspace is open)
@@ -1013,6 +1013,9 @@ impl App {
                 }
                 WorktreeAction::Delete(_) => tracing::info!("Delete worktree requested"),
                 WorktreeAction::PullRemote => self.pull_remote(),
+                WorktreeAction::ResizeSidebar(new_width) => {
+                    self.sidebar_width = new_width;
+                }
                 WorktreeAction::ToggleCollapse => {
                     if let Some(ws) = self.active_ws_mut() {
                         ws.sidebar_collapsed = !ws.sidebar_collapsed;
