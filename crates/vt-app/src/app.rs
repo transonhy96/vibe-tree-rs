@@ -56,6 +56,7 @@ pub struct App {
     scrollbar_active: bool,
     scrollbar_grab_offset: f32,
     portal_width: f32,
+    last_scroll_time: std::time::Instant,
     last_mouse_cell: Option<(usize, i32)>,
     last_mouse_pos: (f32, f32),
     show_context_menu: bool,
@@ -93,6 +94,7 @@ impl App {
             mouse_selecting: false,
             scrollbar_active: false,
             scrollbar_grab_offset: 0.0,
+            last_scroll_time: std::time::Instant::now(),
             portal_width: 0.0,
             last_mouse_cell: None,
             last_mouse_pos: (0.0, 0.0),
@@ -1393,15 +1395,30 @@ impl ApplicationHandler<AppEvent> for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                let lines = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => *y as i32,
-                    winit::event::MouseScrollDelta::PixelDelta(pos) => (pos.y / 20.0) as i32,
-                };
-                if lines != 0 {
-                    if let Some(terminal) = self.active_terminal() {
-                        terminal.scroll(lines);
+                let (mx, my) = self.last_mouse_pos;
+                if self.is_in_terminal_area(mx, my) {
+                    // Debounce: ignore scroll events within 30ms
+                    let now = std::time::Instant::now();
+                    if now.duration_since(self.last_scroll_time).as_millis() < 30 {
+                        return;
                     }
-                    if let Some(gpu) = &self.gpu { gpu.window.request_redraw(); }
+                    self.last_scroll_time = now;
+
+                    let lines = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => {
+                            if *y > 0.0 { 1 } else if *y < 0.0 { -1 } else { 0 }
+                        }
+                        winit::event::MouseScrollDelta::PixelDelta(pos) => {
+                            if pos.y > 5.0 { 1 } else if pos.y < -5.0 { -1 } else { 0 }
+                        }
+                    };
+                    if lines != 0 {
+                        if let Some(terminal) = self.active_terminal() {
+                            terminal.scroll(lines);
+                        }
+                        if let Some(gpu) = &self.gpu { gpu.window.request_redraw(); }
+                    }
+                    return;
                 }
             }
             _ => {}
