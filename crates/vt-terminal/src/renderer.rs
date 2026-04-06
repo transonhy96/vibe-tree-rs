@@ -249,8 +249,22 @@ impl TerminalRenderer {
 
         drop(term);
 
-        // Rebuild when content changed, or always when scrolled (live section updates independently)
+        // Detect URLs before rebuild (modifies row_data colors)
         let needs_rebuild = content_hash != self.last_content_hash || is_scrolled;
+        if needs_rebuild {
+            self.detected_urls.clear();
+            for (line, text, _) in &row_data {
+                for mat in self.url_regex.find_iter(text) {
+                    self.detected_urls.push(DetectedUrl {
+                        url: mat.as_str().to_string(),
+                        line: *line,
+                        col_start: mat.start(),
+                        col_end: mat.end(),
+                    });
+                }
+            }
+        }
+
         if needs_rebuild {
             self.last_content_hash = content_hash;
 
@@ -398,58 +412,14 @@ impl TerminalRenderer {
             }
         }
 
-        // Detect URLs in row_data when content changed
+        // Color lines containing URLs blue
         if needs_rebuild {
-            self.detected_urls.clear();
             self.url_underlines.clear();
-            for (line, text, _color) in &row_data {
-                for mat in self.url_regex.find_iter(text) {
-                    self.detected_urls.push(DetectedUrl {
-                        url: mat.as_str().to_string(),
-                        line: *line,
-                        col_start: mat.start(),
-                        col_end: mat.end(),
-                    });
-
-                    // Create underline: a row of underscores positioned just below the URL text
-                    let url_len = mat.end() - mat.start();
-                    let underline_text = "_".repeat(url_len);
-                    let underline_x = offset_x + mat.start() as f32 * self.cell_width;
-
-                    // Calculate Y position matching the cached line for this row
-                    let underline_y = self.cached_lines.iter()
-                        .find(|cl| (cl.y - offset_y).abs() < self.cell_height * 100.0) // find approx
-                        .map(|_| {
-                            // Use same y calculation as the line itself, offset down slightly
-                            let last_line_val = row_data.last().map(|(l, _, _)| *l).unwrap_or(0);
-                            let first_line_val = row_data.first().map(|(l, _, _)| *l).unwrap_or(0);
-                            let content_lines = (last_line_val - first_line_val + 1) as f32;
-                            let available_rows = ((screen_height as f32 - offset_y) / self.cell_height).floor();
-                            let y_base = if content_lines < available_rows {
-                                offset_y - first_line_val as f32 * self.cell_height
-                            } else {
-                                offset_y + screen_lines as f32 * self.cell_height
-                            };
-                            y_base + *line as f32 * self.cell_height + self.cell_height - 3.0
-                        })
-                        .unwrap_or(0.0);
-
-                    let metrics = Metrics::new(self.font_size * 0.3, self.font_size * 0.4);
-                    let mut buf = GlyphonBuffer::new(&mut self.font_system, metrics);
-                    buf.set_size(&mut self.font_system, Some(screen_width as f32), None);
-                    buf.set_text(
-                        &mut self.font_system,
-                        &underline_text,
-                        Attrs::new().family(Family::Monospace).color(GlyphonColor::rgb(80, 140, 210)),
-                        Shaping::Basic,
-                    );
-                    buf.shape_until_scroll(&mut self.font_system, false);
-                    self.url_underlines.push(CachedLine {
-                        buffer: buf,
-                        x: underline_x,
-                        y: underline_y,
-                        color: GlyphonColor::rgb(80, 140, 210),
-                    });
+            let url_color = GlyphonColor::rgb(100, 160, 255);
+            for entry in &mut row_data {
+                let has_url = self.detected_urls.iter().any(|u| u.line == entry.0);
+                if has_url {
+                    entry.2 = url_color;
                 }
             }
         }
@@ -488,24 +458,6 @@ impl TerminalRenderer {
                     bottom: screen_height as i32,
                 },
                 default_color: div.color,
-                custom_glyphs: &[],
-            });
-        }
-
-        // Add URL underlines
-        for ul in &self.url_underlines {
-            text_areas.push(TextArea {
-                buffer: &ul.buffer,
-                left: ul.x,
-                top: ul.y,
-                scale: 1.0,
-                bounds: TextBounds {
-                    left: 0,
-                    top: 0,
-                    right: screen_width as i32,
-                    bottom: screen_height as i32,
-                },
-                default_color: ul.color,
                 custom_glyphs: &[],
             });
         }
