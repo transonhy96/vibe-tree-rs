@@ -203,6 +203,38 @@ impl X11Backend {
 
     fn get_window_name(&self, window: c_ulong) -> Option<String> {
         unsafe {
+            // Try _NET_WM_NAME first (UTF-8, used by modern apps)
+            let atom_name = CString::new("_NET_WM_NAME").unwrap();
+            let atom = (self.xlib.XInternAtom)(self.display, atom_name.as_ptr(), 0);
+            let utf8_atom_name = CString::new("UTF8_STRING").unwrap();
+            let utf8_atom = (self.xlib.XInternAtom)(self.display, utf8_atom_name.as_ptr(), 0);
+
+            let mut actual_type: c_ulong = 0;
+            let mut actual_format: c_int = 0;
+            let mut nitems: c_ulong = 0;
+            let mut bytes_after: c_ulong = 0;
+            let mut prop: *mut u8 = std::ptr::null_mut();
+
+            let status = (self.xlib.XGetWindowProperty)(
+                self.display, window, atom,
+                0, 1024, 0, utf8_atom,
+                &mut actual_type, &mut actual_format, &mut nitems,
+                &mut bytes_after, &mut prop,
+            );
+
+            if status == 0 && !prop.is_null() && nitems > 0 {
+                let slice = std::slice::from_raw_parts(prop, nitems as usize);
+                let result = String::from_utf8_lossy(slice).into_owned();
+                (self.xlib.XFree)(prop as *mut _);
+                if !result.is_empty() {
+                    return Some(result);
+                }
+            }
+            if !prop.is_null() {
+                (self.xlib.XFree)(prop as *mut _);
+            }
+
+            // Fallback to WM_NAME
             let mut name: *mut i8 = std::ptr::null_mut();
             let status = (self.xlib.XFetchName)(self.display, window, &mut name);
             if status == 0 || name.is_null() {
