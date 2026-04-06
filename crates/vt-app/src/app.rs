@@ -476,7 +476,13 @@ impl App {
 
     fn terminal_left_offset(&self) -> f32 {
         if self.active_ws().is_none() { return WINDOW_PADDING; }
-        self.sidebar_width + WINDOW_PADDING
+        let collapsed = self.active_ws().map(|ws| ws.sidebar_collapsed).unwrap_or(false);
+        if collapsed {
+            // Collapsed sidebar is ~32px (just the toggle button)
+            32.0 + WINDOW_PADDING
+        } else {
+            self.sidebar_width + WINDOW_PADDING
+        }
     }
 
     /// Convert pixel position to terminal grid coordinates.
@@ -1606,6 +1612,23 @@ impl App {
                 WorktreeAction::ToggleCollapse => {
                     if let Some(ws) = self.active_ws_mut() {
                         ws.sidebar_collapsed = !ws.sidebar_collapsed;
+                    }
+                    // Recalculate terminal size after sidebar collapse/expand
+                    if let Some((cw, ch)) = self.terminal_renderer.as_ref()
+                        .map(|r| (r.cell_width, r.cell_height))
+                    {
+                        let (w, h) = self.gpu.as_ref()
+                            .map(|g| (g.config.width as f32, g.config.height as f32))
+                            .unwrap_or((800.0, 600.0));
+                        let new_size = self.calc_terminal_size(w, h, cw, ch);
+                        if new_size != self.terminal_size {
+                            self.terminal_size = new_size;
+                            for ws in &mut self.workspaces {
+                                for t in ws.terminals.values_mut() {
+                                    t.resize(new_size.0, new_size.1);
+                                }
+                            }
+                        }
                     }
                 }
             }
