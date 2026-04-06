@@ -8,6 +8,10 @@ use vt_core::types::Worktree;
 use vt_terminal::{TerminalInstance, TerminalRenderer};
 use vt_embed::{EmbedRect, EmbeddedWindow};
 use vt_ui::{draw_worktree_panel, draw_portal_panel, scan_output, DetectedItem, ThemeColors, WorktreeAction, WorktreePanelResult, PortalAction, PortalPanelResult};
+
+/// Set to `true` to enable the portal panel (app embedding, output scanning).
+/// Disabled by default — work in progress.
+const PORTAL_ENABLED: bool = false;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
@@ -600,89 +604,83 @@ impl App {
             }
         }
 
-        let mut auto_embed_name: Option<String> = None;
-        // Scan terminal output for detectable items
-        {
-            let active_path = self.active_ws()
-                .and_then(|ws| ws.selected_worktree_idx)
-                .and_then(|idx| self.active_ws().and_then(|ws| ws.worktrees.get(idx)))
-                .map(|wt| wt.path.clone());
+        // Portal: scan terminal output and auto-embed (disabled by default)
+        if PORTAL_ENABLED {
+            let mut auto_embed_name: Option<String> = None;
+            {
+                let active_path = self.active_ws()
+                    .and_then(|ws| ws.selected_worktree_idx)
+                    .and_then(|idx| self.active_ws().and_then(|ws| ws.worktrees.get(idx)))
+                    .map(|wt| wt.path.clone());
 
-            if let Some(path) = active_path {
-                if let Some(ws) = self.active_ws_mut() {
-                    if let Some(term) = ws.terminals.get(&path) {
-                        let text = term.visible_text();
-                        // Simple hash to detect content changes
-                        let hash = text.bytes().fold(0u64, |h, b| {
-                            h.wrapping_mul(31).wrapping_add(b as u64)
-                        });
-                        if hash != ws.last_scan_hash {
-                            ws.last_scan_hash = hash;
-                            let new_items = scan_output(&text);
-                            let mut new_app_name: Option<String> = None;
-                            for item in new_items {
-                                if !ws.detected_items.iter().any(|d| d.value == item.value) {
-                                    // Check if it's a new app launch for auto-embed
-                                    if let vt_ui::portal_panel::DetectedKind::AppLaunch(ref name) = item.kind {
-                                        if ws.embedded_window.is_none() {
-                                            new_app_name = Some(name.clone());
+                if let Some(path) = active_path {
+                    if let Some(ws) = self.active_ws_mut() {
+                        if let Some(term) = ws.terminals.get(&path) {
+                            let text = term.visible_text();
+                            let hash = text.bytes().fold(0u64, |h, b| {
+                                h.wrapping_mul(31).wrapping_add(b as u64)
+                            });
+                            if hash != ws.last_scan_hash {
+                                ws.last_scan_hash = hash;
+                                let new_items = scan_output(&text);
+                                let mut new_app_name: Option<String> = None;
+                                for item in new_items {
+                                    if !ws.detected_items.iter().any(|d| d.value == item.value) {
+                                        if let vt_ui::portal_panel::DetectedKind::AppLaunch(ref name) = item.kind {
+                                            if ws.embedded_window.is_none() {
+                                                new_app_name = Some(name.clone());
+                                            }
                                         }
+                                        ws.detected_items.push(item);
                                     }
-                                    ws.detected_items.push(item);
                                 }
-                            }
-                            // Auto-expand portal when items detected
-                            if ws.portal_collapsed && !ws.detected_items.is_empty() {
-                                ws.portal_collapsed = false;
-                            }
-                            // Auto-embed new app if detected
-                            if let Some(app_name) = new_app_name {
-                                auto_embed_name = Some(app_name);
-                            }
-                            if ws.detected_items.len() > 50 {
-                                ws.detected_items.drain(0..ws.detected_items.len() - 50);
+                                if ws.portal_collapsed && !ws.detected_items.is_empty() {
+                                    ws.portal_collapsed = false;
+                                }
+                                if let Some(app_name) = new_app_name {
+                                    auto_embed_name = Some(app_name);
+                                }
+                                if ws.detected_items.len() > 50 {
+                                    ws.detected_items.drain(0..ws.detected_items.len() - 50);
+                                }
                             }
                         }
                     }
                 }
             }
-        }
 
-        // Auto-embed: set pending embed when new app detected
-        if let Some(name) = auto_embed_name {
-            tracing::info!(name = %name, "Auto-embed: starting retry loop");
-            // Expand portal to at least 40% of window for embedded app
-            if let Some(gpu) = &self.gpu {
-                let win_w = gpu.window.inner_size().width as f32 / gpu.window.scale_factor() as f32;
-                let min_portal = win_w * 0.4;
-                if self.portal_width < min_portal {
-                    self.portal_width = min_portal;
-                    if let Some(ws) = self.active_ws_mut() {
-                        ws.portal_collapsed = false;
+            if let Some(name) = auto_embed_name {
+                tracing::info!(name = %name, "Auto-embed: starting retry loop");
+                if let Some(gpu) = &self.gpu {
+                    let win_w = gpu.window.inner_size().width as f32 / gpu.window.scale_factor() as f32;
+                    let min_portal = win_w * 0.4;
+                    if self.portal_width < min_portal {
+                        self.portal_width = min_portal;
+                        if let Some(ws) = self.active_ws_mut() {
+                            ws.portal_collapsed = false;
+                        }
                     }
                 }
+                self.pending_embed = Some((name, std::time::Instant::now(), 0));
             }
-            self.pending_embed = Some((name, std::time::Instant::now(), 0));
-        }
 
-        // Process pending embed: retry every 1s for up to 10 attempts
-        if let Some((ref name, start, retries)) = self.pending_embed.clone() {
-            let has_embedded = self.active_ws().map(|ws| ws.embedded_window.is_some()).unwrap_or(false);
-            if has_embedded {
-                self.pending_embed = None;
-            } else if retries < 10 && start.elapsed().as_millis() > (retries as u128 * 1000) {
-                tracing::info!(name = %name, retries, "Auto-embed: trying...");
-                self.try_embed_by_name(name);
-                self.pending_embed = Some((name.clone(), start, retries + 1));
-                // Schedule redraw for next retry
-                let proxy = self.proxy.clone();
-                self.rt.spawn(async move {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-                    let _ = proxy.send_event(AppEvent::Redraw);
-                });
-            } else if retries >= 10 {
-                tracing::warn!(name = %name, "Auto-embed: gave up after 10 retries");
-                self.pending_embed = None;
+            if let Some((ref name, start, retries)) = self.pending_embed.clone() {
+                let has_embedded = self.active_ws().map(|ws| ws.embedded_window.is_some()).unwrap_or(false);
+                if has_embedded {
+                    self.pending_embed = None;
+                } else if retries < 10 && start.elapsed().as_millis() > (retries as u128 * 1000) {
+                    tracing::info!(name = %name, retries, "Auto-embed: trying...");
+                    self.try_embed_by_name(name);
+                    self.pending_embed = Some((name.clone(), start, retries + 1));
+                    let proxy = self.proxy.clone();
+                    self.rt.spawn(async move {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                        let _ = proxy.send_event(AppEvent::Redraw);
+                    });
+                } else if retries >= 10 {
+                    tracing::warn!(name = %name, "Auto-embed: gave up after 10 retries");
+                    self.pending_embed = None;
+                }
             }
         }
 
@@ -723,9 +721,13 @@ impl App {
         let sidebar_collapsed = self.active_ws().map(|ws| ws.sidebar_collapsed).unwrap_or(false);
         let portal_collapsed = self.active_ws().map(|ws| ws.portal_collapsed).unwrap_or(true);
         let has_embedded = self.active_ws().map(|ws| ws.embedded_window.is_some()).unwrap_or(false);
-        let detected_items: Vec<DetectedItem> = self.active_ws()
-            .map(|ws| ws.detected_items.clone())
-            .unwrap_or_default();
+        let detected_items: Vec<DetectedItem> = if PORTAL_ENABLED {
+            self.active_ws()
+                .map(|ws| ws.detected_items.clone())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         // Get scroll info for scrollbar
         let (scroll_offset, scroll_total) = self.active_terminal()
             .map(|t| t.scroll_info())
@@ -876,8 +878,8 @@ impl App {
                 wt_result = Some(draw_worktree_panel(ctx, &worktrees, selected_wt_idx, &project_name, has_remote_updates, sidebar_collapsed, self.sidebar_width));
             }
 
-            // Portal panel (right side, only when workspace is open)
-            if has_workspace {
+            // Portal panel (right side, only when enabled)
+            if PORTAL_ENABLED && has_workspace {
                 portal_result = Some(draw_portal_panel(ctx, &detected_items, portal_collapsed, has_embedded));
             }
 
@@ -1200,10 +1202,14 @@ impl App {
         self.scrollbar_grab_offset = scrollbar_grab_offset;
 
         // Update portal width and resize terminal if changed
-        let new_portal_w = portal_result.as_ref().map(|r| r.panel_width).unwrap_or(0.0);
+        let new_portal_w = if PORTAL_ENABLED {
+            portal_result.as_ref().map(|r| r.panel_width).unwrap_or(0.0)
+        } else {
+            0.0
+        };
         if (new_portal_w - self.portal_width).abs() > 1.0 {
             self.portal_width = new_portal_w;
-            self.update_embedded_window_position();
+            if PORTAL_ENABLED { self.update_embedded_window_position(); }
             if let Some((cw, ch)) = self.terminal_renderer.as_ref().map(|r| (r.cell_width, r.cell_height)) {
                 if let Some(gpu) = &self.gpu {
                     let new_size = self.calc_terminal_size(gpu.config.width as f32, gpu.config.height as f32, cw, ch);
@@ -1355,7 +1361,7 @@ impl App {
                 terminal.write(b"\x0c"); // Ctrl+L clear
             }
         }
-        if let Some(action) = portal_result.and_then(|r| r.action) {
+        if PORTAL_ENABLED { if let Some(action) = portal_result.and_then(|r| r.action) {
             match action {
                 PortalAction::ToggleCollapse => {
                     if let Some(ws) = self.active_ws_mut() {
@@ -1435,7 +1441,7 @@ impl App {
                     }
                 }
             }
-        }
+        } } // end PORTAL_ENABLED
     }
 }
 
