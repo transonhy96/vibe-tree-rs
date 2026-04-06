@@ -90,6 +90,31 @@ impl X11Backend {
         Ok(())
     }
 
+    pub fn raise_window(&self, window: u64) -> Result<(), EmbedError> {
+        unsafe {
+            (self.xlib.XRaiseWindow)(self.display, window as c_ulong);
+            (self.xlib.XFlush)(self.display);
+        }
+        Ok(())
+    }
+
+    pub fn get_window_position(&self, window: u64) -> (i32, i32) {
+        unsafe {
+            let mut x: c_int = 0;
+            let mut y: c_int = 0;
+            let mut child: c_ulong = 0;
+            (self.xlib.XTranslateCoordinates)(
+                self.display,
+                window as c_ulong,
+                self.root,
+                0, 0,
+                &mut x, &mut y,
+                &mut child,
+            );
+            (x as i32, y as i32)
+        }
+    }
+
     pub fn map_window(&self, window: u64) -> Result<(), EmbedError> {
         unsafe {
             (self.xlib.XMapWindow)(self.display, window as c_ulong);
