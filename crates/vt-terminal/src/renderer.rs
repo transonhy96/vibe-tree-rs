@@ -241,18 +241,27 @@ impl TerminalRenderer {
                 let actual_live = live_line_count.min(screen_lines * 2 / 3).max(2);
                 let scrollback_display_rows = screen_lines - actual_live - 1;
 
-                // Scrollback: render row_data lines sequentially from top.
-                // Use y_shift to place first content line at offset_y.
-                let first_content_line = row_data.iter()
-                    .find(|(_, text, _)| text.chars().any(|c| !c.is_whitespace() && c != '\0'))
-                    .map(|(l, _, _)| *l)
-                    .unwrap_or(-(screen_lines as i32 - 1));
-                let content_row = (first_content_line + screen_lines as i32 - 1) as f32;
-                let y_shift = -content_row * self.cell_height;
-                self.rebuild_lines_with_shift(
-                    &row_data, screen_lines, screen_width, offset_x, offset_y,
-                    scrollback_display_rows, y_shift,
-                );
+                // Scrollback: place rows sequentially from top.
+                // Each row_data entry maps to a sequential screen row.
+                let metrics = Metrics::new(self.font_size, self.cell_height);
+                self.cached_lines.clear();
+                let mut screen_row = 0usize;
+                for (_, text, color) in &row_data {
+                    if screen_row >= scrollback_display_rows { break; }
+                    let has_content = text.chars().any(|c| !c.is_whitespace() && c != '\0');
+                    if !has_content {
+                        screen_row += 1;
+                        continue;
+                    }
+                    let y = offset_y + screen_row as f32 * self.cell_height;
+                    let mut buf = GlyphonBuffer::new(&mut self.font_system, metrics);
+                    buf.set_size(&mut self.font_system, Some(screen_width as f32), None);
+                    buf.set_text(&mut self.font_system, text,
+                        Attrs::new().family(Family::Monospace).color(*color), Shaping::Basic);
+                    buf.shape_until_scroll(&mut self.font_system, false);
+                    self.cached_lines.push(CachedLine { buffer: buf, x: offset_x, y, color: *color });
+                    screen_row += 1;
+                }
 
                 // Divider
                 let divider_y = offset_y + scrollback_display_rows as f32 * self.cell_height;
