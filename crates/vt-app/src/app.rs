@@ -650,6 +650,17 @@ impl App {
         // Auto-embed: set pending embed when new app detected
         if let Some(name) = auto_embed_name {
             tracing::info!(name = %name, "Auto-embed: starting retry loop");
+            // Expand portal to at least 40% of window for embedded app
+            if let Some(gpu) = &self.gpu {
+                let win_w = gpu.window.inner_size().width as f32 / gpu.window.scale_factor() as f32;
+                let min_portal = win_w * 0.4;
+                if self.portal_width < min_portal {
+                    self.portal_width = min_portal;
+                    if let Some(ws) = self.active_ws_mut() {
+                        ws.portal_collapsed = false;
+                    }
+                }
+            }
             self.pending_embed = Some((name, std::time::Instant::now(), 0));
         }
 
