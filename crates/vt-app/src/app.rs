@@ -830,30 +830,58 @@ impl App {
                         // Scrollbar on right edge
                         if scroll_total > 0 {
                             let panel_rect = ui.max_rect();
-                            let bar_width = 6.0;
+                            let bar_width = 8.0;
                             let track_height = panel_rect.height();
-                            let track_x = panel_rect.right() - bar_width - 2.0;
+                            let track_x = panel_rect.right() - bar_width;
                             let track_y = panel_rect.top();
 
-                            // Draw track (subtle)
+                            // Track
                             let track_rect = egui::Rect::from_min_size(
                                 egui::pos2(track_x, track_y),
                                 egui::vec2(bar_width, track_height),
                             );
                             ui.painter().rect_filled(track_rect, 3.0,
-                                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 10));
+                                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 15));
 
-                            // Thumb
-                            let visible = self.terminal_size.1 as f32;
+                            // Thumb position: offset=0 → bottom, offset=max → top
+                            let visible = term_size.1 as f32;
                             let total = scroll_total as f32 + visible;
-                            let thumb_h = (visible / total * track_height).max(20.0);
-                            let thumb_y = track_y + (1.0 - (scroll_offset as f32 + visible) / total) * (track_height - thumb_h);
+                            let thumb_ratio = visible / total;
+                            let thumb_h = (thumb_ratio * track_height).max(24.0);
+                            let scroll_ratio = scroll_offset as f32 / scroll_total.max(1) as f32;
+                            let thumb_y = track_y + (1.0 - scroll_ratio) * (track_height - thumb_h);
+
                             let thumb_rect = egui::Rect::from_min_size(
                                 egui::pos2(track_x, thumb_y),
                                 egui::vec2(bar_width, thumb_h),
                             );
-                            ui.painter().rect_filled(thumb_rect, 3.0,
-                                egui::Color32::from_rgba_unmultiplied(200, 200, 200, 80));
+
+                            // Interactive thumb
+                            let thumb_resp = ui.interact(thumb_rect, egui::Id::new("scrollbar_thumb"), egui::Sense::drag());
+                            let thumb_color = if thumb_resp.dragged() || thumb_resp.hovered() {
+                                egui::Color32::from_rgba_unmultiplied(220, 220, 220, 160)
+                            } else {
+                                egui::Color32::from_rgba_unmultiplied(180, 180, 180, 100)
+                            };
+                            ui.painter().rect_filled(thumb_rect, 3.0, thumb_color);
+
+                            // Drag to scroll
+                            if thumb_resp.dragged() {
+                                let delta_y = thumb_resp.drag_delta().y;
+                                let lines_per_pixel = scroll_total as f32 / (track_height - thumb_h).max(1.0);
+                                terminal_scroll = -(delta_y * lines_per_pixel) as i32;
+                            }
+
+                            // Click on track to jump
+                            let track_resp = ui.interact(track_rect, egui::Id::new("scrollbar_track"), egui::Sense::click());
+                            if track_resp.clicked() {
+                                if let Some(pos) = track_resp.interact_pointer_pos() {
+                                    let click_ratio = (pos.y - track_y) / track_height;
+                                    let target_offset = ((1.0 - click_ratio) * scroll_total as f32) as i32;
+                                    let current = scroll_offset as i32;
+                                    terminal_scroll = target_offset - current;
+                                }
+                            }
                         }
                     }
                 });
