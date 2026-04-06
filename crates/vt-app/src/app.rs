@@ -54,7 +54,8 @@ pub struct App {
     wants_quit: bool,
     mouse_selecting: bool,
     scrollbar_active: bool,
-    scrollbar_grab_offset: f32, // where user grabbed the thumb (0=top of thumb, thumb_h=bottom)
+    scrollbar_grab_offset: f32,
+    portal_width: f32,
     last_mouse_cell: Option<(usize, i32)>,
     last_mouse_pos: (f32, f32),
     show_context_menu: bool,
@@ -92,6 +93,7 @@ impl App {
             mouse_selecting: false,
             scrollbar_active: false,
             scrollbar_grab_offset: 0.0,
+            portal_width: 0.0,
             last_mouse_cell: None,
             last_mouse_pos: (0.0, 0.0),
             show_context_menu: false,
@@ -400,7 +402,11 @@ impl App {
     fn is_in_terminal_area(&self, x: f32, y: f32) -> bool {
         let left = self.terminal_left_offset();
         let header = 80.0;
-        x >= left && y >= header && !self.scrollbar_active
+        let win_w = self.gpu.as_ref()
+            .map(|g| g.window.inner_size().width as f32 / g.window.scale_factor() as f32)
+            .unwrap_or(1200.0);
+        let right = win_w - self.portal_width - 10.0; // portal + scrollbar
+        x >= left && y >= header && x < right && !self.scrollbar_active
     }
 
     fn setup_cursor_blink(&self) {
@@ -529,9 +535,10 @@ impl App {
     }
 
     fn calc_terminal_size(&self, w: f32, h: f32, cw: f32, ch: f32) -> (u16, u16) {
-        let header = 80.0_f32; // tabs + header
+        let header = 80.0_f32;
         let left = self.terminal_left_offset();
-        let cols = ((w - left).max(cw) / cw).floor() as u16;
+        let right = self.portal_width + 10.0; // portal + scrollbar
+        let cols = ((w - left - right).max(cw) / cw).floor() as u16;
         let rows = ((h - header).max(ch) / ch).floor() as u16;
         (cols.max(2), rows.max(1))
     }
@@ -1112,6 +1119,23 @@ impl App {
 
         self.scrollbar_active = scrollbar_hovered;
         self.scrollbar_grab_offset = scrollbar_grab_offset;
+
+        // Update portal width and resize terminal if changed
+        let new_portal_w = portal_result.as_ref().map(|r| r.panel_width).unwrap_or(0.0);
+        if (new_portal_w - self.portal_width).abs() > 1.0 {
+            self.portal_width = new_portal_w;
+            if let Some((cw, ch)) = self.terminal_renderer.as_ref().map(|r| (r.cell_width, r.cell_height)) {
+                if let Some(gpu) = &self.gpu {
+                    let new_size = self.calc_terminal_size(gpu.config.width as f32, gpu.config.height as f32, cw, ch);
+                    if new_size != self.terminal_size {
+                        self.terminal_size = new_size;
+                        for ws in &mut self.workspaces {
+                            for t in ws.terminals.values_mut() { t.resize(new_size.0, new_size.1); }
+                        }
+                    }
+                }
+            }
+        }
 
         // Set cursor based on area and egui state
         if let Some(gpu) = &self.gpu {
