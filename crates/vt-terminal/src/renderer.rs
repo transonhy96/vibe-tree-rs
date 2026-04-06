@@ -143,10 +143,10 @@ impl TerminalRenderer {
         if let Some(ref sel) = selection {
             content_hash = content_hash
                 .wrapping_mul(31)
-                .wrapping_add(sel.start.line.0 as u64 * 101)
-                .wrapping_add(sel.start.column.0 as u64 * 103)
-                .wrapping_add(sel.end.line.0 as u64 * 107)
-                .wrapping_add(sel.end.column.0 as u64 * 109);
+                .wrapping_add((sel.start.line.0 as i64 as u64).wrapping_mul(101))
+                .wrapping_add((sel.start.column.0 as u64).wrapping_mul(103))
+                .wrapping_add((sel.end.line.0 as i64 as u64).wrapping_mul(107))
+                .wrapping_add((sel.end.column.0 as u64).wrapping_mul(109));
         }
 
         for indexed in content.display_iter {
